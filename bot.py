@@ -447,6 +447,174 @@ async def btc_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+    
+    # --- АНТИКАПС ---
+async def anticaps_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global anticaps_on
+    anticaps_on = True
+    await update.message.reply_text("🔠 Антикапс ВКЛЮЧЕН (сообщения с большим количеством заглавных букв будут удаляться)")
+
+async def anticaps_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global anticaps_on
+    anticaps_on = False
+    await update.message.reply_text("🔠 Антикапс ВЫКЛЮЧЕН")
+
+# --- АНТИФЛУД ---
+async def antiflood_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global antiflood_on
+    antiflood_on = True
+    await update.message.reply_text("🌊 Антифлуд ВКЛЮЧЕН (сообщения чаще 5 раз в 10 секунд будут удаляться)")
+
+async def antiflood_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global antiflood_on
+    antiflood_on = False
+    await update.message.reply_text("🌊 Антифлуд ВЫКЛЮЧЕН")
+
+# --- ФИЛЬТР ССЫЛОК ---
+async def links_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global links_filter_on
+    links_filter_on = True
+    await update.message.reply_text("🔗 Фильтр ссылок ВКЛЮЧЕН")
+
+async def links_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global links_filter_on
+    links_filter_on = False
+    await update.message.reply_text("🔗 Фильтр ссылок ВЫКЛЮЧЕН")
+
+# --- БЛОКИРОВКА/РАЗБЛОКИРОВКА (для групп) ---
+async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы забанить")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    try:
+        await update.effective_chat.ban_member(user_id)
+        await update.message.reply_text(f"🔨 Пользователь заблокирован!")
+    except:
+        await update.message.reply_text("❌ Недостаточно прав или пользователь админ")
+
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы разблокировать")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    try:
+        await update.effective_chat.unban_member(user_id)
+        await update.message.reply_text(f"🔓 Пользователь разблокирован!")
+    except:
+        await update.message.reply_text("❌ Недостаточно прав")
+
+async def kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы кикнуть")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    try:
+        await update.effective_chat.ban_member(user_id)
+        await update.effective_chat.unban_member(user_id)
+        await update.message.reply_text(f"👢 Пользователь исключён!")
+    except:
+        await update.message.reply_text("❌ Недостаточно прав")
+
+# --- МУТ/РАЗМУТ ---
+async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы замутить")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    try:
+        await update.effective_chat.restrict_member(user_id, permissions={'can_send_messages': False})
+        await update.message.reply_text(f"🔇 Пользователь замучен!")
+    except:
+        await update.message.reply_text("❌ Недостаточно прав")
+
+async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы размутить")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    try:
+        await update.effective_chat.restrict_member(user_id, permissions={'can_send_messages': True})
+        await update.message.reply_text(f"🔊 Пользователь размучен!")
+    except:
+        await update.message.reply_text("❌ Недостаточно прав")
+
+# --- ПРЕДУПРЕЖДЕНИЯ ---
+async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы выдать предупреждение")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    user_name = update.message.reply_to_message.from_user.full_name
+    
+    if user_id not in warns:
+        warns[user_id] = 0
+    warns[user_id] += 1
+    
+    await update.message.reply_text(f"⚠️ {user_name} получил предупреждение! ({warns[user_id]}/3)")
+    
+    if warns[user_id] >= 3:
+        try:
+            await update.effective_chat.ban_member(user_id)
+            await update.message.reply_text(f"🔨 {user_name} забанен за 3 предупреждения!")
+        except:
+            await update.message.reply_text("❌ Недостаточно прав для бана")
+
+async def clearwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    if user_id in warns:
+        warns[user_id] = 0
+        await update.message.reply_text(f"✅ Предупреждения очищены!")
+    else:
+        await update.message.reply_text("❌ У пользователя нет предупреждений")
+
+# --- РАНГИ ---
+async def setrank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ Укажите ранг: /setrank Новичок")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    rank_name = ' '.join(context.args)
+    ranks[user_id] = rank_name
+    await update.message.reply_text(f"👑 Ранг '{rank_name}' назначен!")
+
+async def rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message:
+        user_id = update.message.reply_to_message.from_user.id
+        user_name = update.message.reply_to_message.from_user.full_name
+        rank_name = ranks.get(user_id, "Новичок")
+        await update.message.reply_text(f"👑 Ранг {user_name}: {rank_name}")
+    else:
+        user_id = update.effective_user.id
+        rank_name = ranks.get(user_id, "Новичок")
+        await update.message.reply_text(f"👑 Твой ранг: {rank_name}")
+
+async def delrank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Ответьте на сообщение пользователя")
+        return
+    
+    user_id = update.message.reply_to_message.from_user.id
+    if user_id in ranks:
+        del ranks[user_id]
+        await update.message.reply_text(f"✅ Ранг снят!")
+    else:
+        await update.message.reply_text("❌ У пользователя нет ранга")
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -463,28 +631,53 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         name = ' '.join(context.args)
         await update.message.reply_text(f"🔍 Ищу: {name}... (в разработке)")
-
-# --- СТАРТ ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
+        
+        # --- ОЧИСТКА ТЕКСТА ОТ ТОЧЕК И ПОДЧЁРКИВАНИЙ ДЛЯ ПРОВЕРКИ МАТОВ ---
+def clean_text_for_badwords(text):
+    # Удаляем точки, нижние подчёркивания, пробелы между буквами
+    text = text.replace('.', '').replace('_', '').replace('-', '').replace(' ', '')
     
-    keyboard = [
-        [InlineKeyboardButton("🏠 Перейти в меню", callback_data="main_menu")],
-        [InlineKeyboardButton("➕ Присоединить в группу", url="https://t.me/AgentTCK_bot?startgroup=true")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Заменяем буквы на похожие (чтобы ловить "б.л.я" и "с_у_к_а")
+    replacements = {
+        'а': '[аa@]',
+        'б': '[бb6]',
+        'в': '[вb]',
+        'г': '[гg]',
+        'д': '[дd]',
+        'е': '[еeё]',
+        'ё': '[ёe]',
+        'ж': '[ж]',
+        'з': '[зz3]',
+        'и': '[иu]',
+        'й': '[й]',
+        'к': '[кk]',
+        'л': '[лl]',
+        'м': '[мm]',
+        'н': '[нn]',
+        'о': '[оo0]',
+        'п': '[пp]',
+        'р': '[рr]',
+        'с': '[сc]',
+        'т': '[тt]',
+        'у': '[уy]',
+        'ф': '[ф]',
+        'х': '[хx]',
+        'ц': '[ц]',
+        'ч': '[ч]',
+        'ш': '[ш]',
+        'щ': '[щ]',
+        'ъ': '[ъ]',
+        'ы': '[ы]',
+        'ь': '[ь]',
+        'э': '[э]',
+        'ю': '[ю]',
+        'я': '[я]',
+    }
     
-    text = """🤖 **Привет! Я Агент ТЦК!**
+    # Упрощаем: убираем все точки и подчёркивания для проверки
+    clean = ''.join(c for c in text if c.isalpha() or c.isdigit())
+    return clean
 
-⛏️ Добро пожаловать в мир криптовалют!
-
-Я — современный помощник для защиты и управления Telegram-сообществами, а также твой гид в мире Биткойна!
-
-Нажмите кнопку ниже, чтобы открыть меню или нажмите ещё ниже чтобы добавить бота в вашу группу"""
-
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    
 # --- АНТИ-СПАМ ---
 async def check_duplicates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
@@ -500,7 +693,20 @@ async def check_duplicates(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.caption
     
     if profanity_on and text:
-        bad_words = ['хуй', 'пизда', 'бля', 'сука', 'залупа', 'ебать']
+        bad_words = [
+    # Основные
+    'хуй', 'пизда', 'бля', 'блять', 'блядь', 'сука', 'залупа', 'ебать', 'ебат', 'ёбаный',
+    'еблан', 'ебло', 'ебучий', 'нахуй', 'похуй', 'схуй', 'дохуя', 'охуеть', 'охуительный',
+    'пиздец', 'пиздить', 'пиздюк', 'пидор', 'пидорас', 'гандон', 'гандон', 'мудила',
+    'мудак', 'мудень', 'ссать', 'срать', 'говно', 'говнище', 'говнюк', 'дерьмо',
+    'пездюк', 'паскуда', 'тварь', 'суки', 'сучара', 'сучий', 'выблядок', 'блядский',
+    'ебанутый', 'ебануться', 'ебашит', 'ебашить', 'заебать', 'заебало', 'заебись',
+    'наеб', 'наебать', 'проебать', 'проебали', 'уебок', 'уебище', 'уёбищный',
+    'хер', 'херня', 'херовий', 'хрен', 'хреново', 'хреновый', 'херовый', 'херь',
+    'долбоёб', 'долбаёб', 'даун', 'дебил', 'идиот', 'кретин', 'олух',
+    
+    # С точками и заменами (автоматически обрабатывается ниже)
+]
         if any(word in text.lower() for word in bad_words):
             await update.message.delete()
             await update.message.reply_text(f"🚫 {update.effective_user.first_name}, маты запрещены!")
@@ -553,71 +759,85 @@ async def games_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await query.edit_message_text("🎮 **Меню игр**\n\nВыберите игру:", reply_markup=reply_markup, parse_mode='Markdown')
      
-# --- ОБРАБОТКА КОМАНД БЕЗ / (текстом) ---
+# --- ОБРАБОТКА КОМАНД БЕЗ / (текстом) НА РУССКОМ ---
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     
     text = update.message.text.lower().strip()
-    user = update.effective_user
-    chat = update.effective_chat
-    
-    # Ответ на сообщение (если есть)
     reply_to = update.message.reply_to_message
     target_user = reply_to.from_user if reply_to else None
     
-    # --- КОМАНДЫ БЕЗ / ---
-    if text == "ранг":
+    # --- КОМАНДЫ НА РУССКОМ ---
+    if text in ["ранг", "мой ранг", "узнать ранг"]:
         if target_user:
-            await update.message.reply_text(f"👑 Ранг пользователя {target_user.full_name}: Новичок")
+            user_id = target_user.id
+            rank_name = ranks.get(user_id, "Новичок")
+            await update.message.reply_text(f"👑 Ранг {target_user.full_name}: {rank_name}")
         else:
-            await update.message.reply_text(f"👑 Твой ранг: Новичок")
+            user_id = update.effective_user.id
+            rank_name = ranks.get(user_id, "Новичок")
+            await update.message.reply_text(f"👑 Твой ранг: {rank_name}")
     
-    elif text == "снять ранг":
+    elif text in ["снять ранг", "убрать ранг", "удалить ранг"]:
         if target_user:
-            await update.message.reply_text(f"✅ Ранг снят с {target_user.full_name}")
-        else:
-            await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы снять ранг")
-    
-    elif text.startswith("бан "):
-        name = text[4:].strip()
-        if name:
-            await update.message.reply_text(f"🔨 Пользователь {name} заблокирован!")
-        else:
-            await update.message.reply_text("❌ Укажите пользователя: бан @username")
-    
-    elif text.startswith("кик "):
-        name = text[4:].strip()
-        if name:
-            await update.message.reply_text(f"👢 Пользователь {name} исключён!")
-        else:
-            await update.message.reply_text("❌ Укажите пользователя: кик @username")
-    
-    elif text == "мут":
-        if target_user:
-            await update.message.reply_text(f"🔇 {target_user.full_name} замучен на 5 минут!")
-        else:
-            await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы замутить")
-    
-    elif text == "размут":
-        if target_user:
-            await update.message.reply_text(f"🔊 {target_user.full_name} размучен!")
-        else:
-            await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы размутить")
-    
-    elif text == "варн":
-        if target_user:
-            await update.message.reply_text(f"⚠️ {target_user.full_name} получил предупреждение!")
-        else:
-            await update.message.reply_text("❌ Ответьте на сообщение пользователя, чтобы выдать предупреждение")
-    
-    elif text == "очистить варны":
-        if target_user:
-            await update.message.reply_text(f"✅ Предупреждения {target_user.full_name} очищены!")
+            user_id = target_user.id
+            if user_id in ranks:
+                del ranks[user_id]
+                await update.message.reply_text(f"✅ Ранг снят с {target_user.full_name}")
+            else:
+                await update.message.reply_text("❌ У пользователя нет ранга")
         else:
             await update.message.reply_text("❌ Ответьте на сообщение пользователя")
     
-    elif text == "правила":
+    elif text.startswith("бан ") or text.startswith("забанить "):
+        name = text.replace("бан ", "").replace("забанить ", "").strip()
+        if name:
+            await update.message.reply_text(f"🔨 Пользователь {name} заблокирован!")
+        else:
+            await update.message.reply_text("❌ Укажите: бан @username")
+    
+    elif text.startswith("кик ") or text.startswith("выгнать ") or text.startswith("исключить "):
+        name = text.replace("кик ", "").replace("выгнать ", "").replace("исключить ", "").strip()
+        if name:
+            await update.message.reply_text(f"👢 Пользователь {name} исключён!")
+        else:
+            await update.message.reply_text("❌ Укажите: кик @username")
+    
+    elif text in ["мут", "замутить", "заткнуть"]:
+        if target_user:
+            await update.message.reply_text(f"🔇 {target_user.full_name} замучен!")
+        else:
+            await update.message.reply_text("❌ Ответьте на сообщение пользователя")
+    
+    elif text in ["размут", "размутить", "отмутить"]:
+        if target_user:
+            await update.message.reply_text(f"🔊 {target_user.full_name} размучен!")
+        else:
+            await update.message.reply_text("❌ Ответьте на сообщение пользователя")
+    
+    elif text in ["варн", "предупреждение", "выдать варн"]:
+        if target_user:
+            user_id = target_user.id
+            if user_id not in warns:
+                warns[user_id] = 0
+            warns[user_id] += 1
+            await update.message.reply_text(f"⚠️ {target_user.full_name} получил предупреждение! ({warns[user_id]}/3)")
+        else:
+            await update.message.reply_text("❌ Ответьте на сообщение пользователя")
+    
+    elif text in ["очистить варны", "сбросить варны", "убрать предупреждения"]:
+        if target_user:
+            user_id = target_user.id
+            if user_id in warns:
+                warns[user_id] = 0
+                await update.message.reply_text(f"✅ Предупреждения {target_user.full_name} очищены!")
+            else:
+                await update.message.reply_text("❌ У пользователя нет предупреждений")
+        else:
+            await update.message.reply_text("❌ Ответьте на сообщение пользователя")
+    
+    elif text in ["правила", "показать правила"]:
         rules_text = """📜 **Правила сообщества:**
 
 1️⃣ Не спамить
@@ -626,14 +846,14 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
 4️⃣ Уважать друг друга
 5️⃣ Запрещена реклама
 
-Нарушение правил = предупреждение или бан!"""
+Нарушение = предупреждение или бан!"""
         await update.message.reply_text(rules_text, parse_mode='Markdown')
     
-    elif text == "возможности":
+    elif text in ["возможности", "что умеешь", "функции", "команды"]:
         features_text = """🚀 **Возможности бота:**
 
-🎮 **Игры:**
-• Угадай число
+⛏️ **Игры:**
+• Майнер Биткойна
 
 🛡️ **Модерация:**
 • Фильтр матов
@@ -645,9 +865,16 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
 • Назначение/снятие рангов
 
 📊 **Статистика:**
-• Информация о пользователе"""
-        await update.message.reply_text(features_text, parse_mode='Markdown')
+• Информация о пользователе
 
+💬 **Команды на русском:**
+• "ранг" — узнать свой ранг
+• "мут" (ответом) — замутить
+• "варн" (ответом) — предупреждение
+• "бан @username" — заблокировать
+• "кик @username" — исключить"""
+        await update.message.reply_text(features_text, parse_mode='Markdown')
+        
 # --- ОСНОВНАЯ ФУНКЦИЯ ---
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -665,6 +892,22 @@ def main():
     app.add_handler(CommandHandler("on18", on18))
     app.add_handler(CommandHandler("un18", un18))
     app.add_handler(CommandHandler("info", info))
+    app.add_handler(CommandHandler("anticaps_on", anticaps_on))
+    app.add_handler(CommandHandler("anticaps_off", anticaps_off))
+    app.add_handler(CommandHandler("antiflood_on", antiflood_on))
+    app.add_handler(CommandHandler("antiflood_off", antiflood_off))
+    app.add_handler(CommandHandler("links_on", links_on))
+    app.add_handler(CommandHandler("links_off", links_off))
+    app.add_handler(CommandHandler("ban", ban))
+    app.add_handler(CommandHandler("unban", unban))
+    app.add_handler(CommandHandler("kick", kick))
+    app.add_handler(CommandHandler("mute", mute))
+    app.add_handler(CommandHandler("unmute", unmute))
+    app.add_handler(CommandHandler("warn", warn))
+    app.add_handler(CommandHandler("clearwarns", clearwarns))
+    app.add_handler(CommandHandler("setrank", setrank))
+    app.add_handler(CommandHandler("rank", rank))
+    app.add_handler(CommandHandler("delrank", delrank))
     
     # Обработка кнопок
     app.add_handler(CallbackQueryHandler(about_callback, pattern="about"))
