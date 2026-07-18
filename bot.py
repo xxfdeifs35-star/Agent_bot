@@ -30,13 +30,17 @@ MAX_ROULETTE = 6
 MIN_ROULETTE = 2
 COOKIES_TOTAL = 30
 PAY_LIMIT = 45000
-PAY_WINDOW = 24 * 3600
+PAY_WINDOW = 24 * 60
+CREDIT_MAX = 300000
 BANKER_USERNAME = "SANS_ZM"
 CREDIT_COMMISSION = 0.05
-CREDIT_MAX = 300000
 CREDIT_MINUTES = 30
+USD_START_RATE = 44.0
+USD_UPDATE_SECONDS = 120
+USD_MAX_CHANGE = 0.15
 
 credits = {}  # {user_id: {"amount": int, "taken_at": ts, "chat_id": int}}
+usd_rate = USD_START_RATE  # монет за 1 доллар
 
 # ================= УНО: КОЛОДА И ЛОГИКА =================
 
@@ -969,8 +973,8 @@ async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if already_sent + amount > PAY_LIMIT:
         remaining = PAY_LIMIT - already_sent
         await update.message.reply_text(
-            f"❌ Превышен лимит переводов: {PAY_LIMIT} монет за 24 часа.\n"
-            f"Уже отправлено за последние 24ч: {already_sent}\nОсталось доступно: {max(remaining, 0)}"
+            f"❌ Превышен лимит переводов: {PAY_LIMIT} монет за 24 минуты.\n"
+            f"Уже отправлено за последние 24 мин: {already_sent}\nОсталось доступно: {max(remaining, 0)}"
         )
         return
 
@@ -1356,7 +1360,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Максимальная сумма кредита: {CREDIT_MAX} монет.")
         return
 
-    # расчёт комиссии
+    # расчёт комиссии (тихо, без упоминаний)
     commission = round(amount * CREDIT_COMMISSION)
     payout = amount - commission
 
@@ -1372,7 +1376,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     credits[user_id] = {"amount": amount, "taken_at": time.time(), "chat_id": chat_id}
     asyncio.create_task(schedule_collection(user_id, chat_id, context.bot))
 
-    # В сообщении НЕ упоминаем комиссию и банкира
+    # Сообщение БЕЗ упоминаний о комиссии и банкире
     await update.message.reply_text(
         f"💳 **Кредит выдан: {amount} монет**\n\n"
         f"На баланс зачислено: {payout} монет\n\n"
@@ -1400,6 +1404,94 @@ async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del credits[user_id]
     await update.message.reply_text(f"✅ Кредит на {amount} монет погашен досрочно!\nБаланс: {players[user_id]['balance']} монет")
 
+# ================= БИРЖА: ДОЛЛАР ($) =================
+
+def ensure_usd(uid):
+    players[uid].setdefault('usd', 0.0)
+
+async def usd_rate_loop():
+    global usd_rate
+    while True:
+        await asyncio.sleep(USD_UPDATE_SECONDS)
+        change = random.uniform(-USD_MAX_CHANGE, USD_MAX_CHANGE)
+        usd_rate = round(max(1.0, usd_rate * (1 + change)), 2)
+
+async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"💵 **Курс доллара**\n\n1 $ = {usd_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
+        parse_mode='Markdown'
+    )
+
+async def buyusd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    ensure_usd(user_id)
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(f"Использование: /buyusd <монеты>\nКурс: 1 $ = {usd_rate} монет")
+        return
+
+    coins = int(args[0])
+    if coins <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
+        return
+    if players[user_id]['balance'] < coins:
+        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
+        return
+
+    usd_bought = round(coins / usd_rate, 4)
+    players[user_id]['balance'] -= coins
+    players[user_id]['usd'] += usd_bought
+
+    await update.message.reply_text(
+        f"💵 Куплено: {usd_bought} $ по курсу {usd_rate}\n\n"
+        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['usd'], 4)} $"
+    )
+
+async def sellusd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    ensure_usd(user_id)
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(f"Использование: /sellusd <доллары>\nКурс: 1 $ = {usd_rate} монет")
+        return
+
+    try:
+        usd_amount = float(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Введи число, например: /sellusd 2.5")
+        return
+
+    if usd_amount <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
+        return
+    if players[user_id]['usd'] < usd_amount:
+        await update.message.reply_text(f"❌ Недостаточно долларов. У тебя: {round(players[user_id]['usd'], 4)} $")
+        return
+
+    coins_gained = round(usd_amount * usd_rate)
+    players[user_id]['usd'] -= usd_amount
+    players[user_id]['balance'] += coins_gained
+
+    await update.message.reply_text(
+        f"💵 Продано: {usd_amount} $ по курсу {usd_rate}\n\n"
+        f"Получено: {coins_gained} монет\n"
+        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['usd'], 4)} $"
+    )
+
 # ================= ОБЫЧНЫЕ КОМАНДЫ =================
 
 async def touch_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1424,6 +1516,9 @@ async def set_commands(app):
         ("pay", "💸 Перевести монеты"),
         ("credit", "💳 Взять кредит"),
         ("payback", "✅ Погасить кредит"),
+        ("rate", "💵 Курс доллара"),
+        ("buyusd", "📈 Купить доллары"),
+        ("sellusd", "📉 Продать доллары"),
         ("top", "🏆 Рейтинг игроков"),
     ]
     await app.bot.set_my_commands(commands)
@@ -1492,11 +1587,12 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ты ещё не зарегистрирован! Напиши /start")
         return
     player = players[user_id]
+    usd_line = f"💵 Доллары: {round(player.get('usd', 0), 4)} $\n" if player.get('usd', 0) else ""
     text = f"""👤 **Твой профиль**
 
 📛 Имя: {player['name']}
 💰 Баланс: {player['balance']} монет
-🏆 Побед: {player['wins']}
+{usd_line}🏆 Побед: {player['wins']}
 😢 Поражений: {player['losses']}
 
 📊 Игр сыграно: {player['games']['uno']}"""
@@ -1574,16 +1670,24 @@ HELP_TEXT = f"""📖 **Помощь**
 
 💸 **Перевод монет**
 • Ответь на сообщение игрока командой `/pay <сумма>`
-• Лимит: не больше {PAY_LIMIT} монет за 24 часа одному отправителю
+• Лимит: не больше {PAY_LIMIT} монет за 24 минуты одному отправителю
 
 ━━━━━━━━━━━━━━━
 
 💳 **Кредит**
 • `/credit <сумма>` — максимум {CREDIT_MAX} монет, только один активный кредит одновременно
-• Кредит выдаётся без комиссии — на баланс зачисляется вся сумма, а возвращать нужно будет ту же сумму кредита
+• Кредит выдаётся с комиссией 5% — на баланс зачисляется вся сумма, а возвращать нужно будет ту же сумму кредита
 • Через {CREDIT_MINUTES} минут долг спишется автоматически — придут коллекторы и заберут всю сумму кредита
 • Если денег не хватит — баланс уйдёт в минус
 • Погасить раньше самому: `/payback`
+
+━━━━━━━━━━━━━━━
+
+💵 **Доллар ($) — биржа**
+• `/rate` — текущий курс (стартует с {USD_START_RATE} монет за $, дальше меняется случайно каждые {USD_UPDATE_SECONDS // 60} минуты)
+• `/buyusd <монеты>` — купить доллары за монеты по текущему курсу
+• `/sellusd <доллары>` — продать доллары обратно в монеты по текущему курсу
+• Курс скачет случайно ±{int(USD_MAX_CHANGE * 100)}% каждые {USD_UPDATE_SECONDS // 60} минуты — можно ловить моменты подешевле/подороже
 
 ━━━━━━━━━━━━━━━
 
@@ -1765,7 +1869,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Например: `/pay 500`
 
-⚠️ Лимит: не больше {PAY_LIMIT} монет за 24 часа одному отправителю."""
+⚠️ Лимит: не больше {PAY_LIMIT} монет за 24 минуты одному отправителю."""
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -1800,12 +1904,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= ГЛАВНАЯ ФУНКЦИЯ =================
 
-def main():
-    app = Application.builder().token(TOKEN).build()
+async def post_init(app):
+    await set_commands(app)
+    asyncio.create_task(usd_rate_loop())
 
-    import asyncio
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(set_commands(app))
+def main():
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(MessageHandler(filters.ALL, touch_username), group=-1)
     app.add_handler(CallbackQueryHandler(touch_username), group=-1)
@@ -1824,6 +1928,9 @@ def main():
     app.add_handler(CommandHandler("pay", pay_command))
     app.add_handler(CommandHandler("credit", credit_command))
     app.add_handler(CommandHandler("payback", payback_command))
+    app.add_handler(CommandHandler("rate", rate_command))
+    app.add_handler(CommandHandler("buyusd", buyusd_command))
+    app.add_handler(CommandHandler("sellusd", sellusd_command))
     app.add_handler(CommandHandler("cookies", cookies_command))
     app.add_handler(CommandHandler("stopcookies", stop_cookies_command))
 
