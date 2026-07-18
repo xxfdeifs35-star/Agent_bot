@@ -41,7 +41,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
     
     keyboard = [
-        [InlineKeyboardButton("🃏 УНО", callback_data="game_uno")],
+        [InlineKeyboardButton("🎮 Игры", callback_data="games_menu")],
         [InlineKeyboardButton("👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
         [InlineKeyboardButton("📖 Помощь", callback_data="help")]
@@ -54,11 +54,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🏆 Побед: {players[user_id]['wins']}
 😢 Поражений: {players[user_id]['losses']}
 
-Выбери игру или действие:"""
+Выбери действие:"""
 
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     context.user_data['menu_owner'] = user_id
-
+    
 # --- ПРОФИЛЬ ---
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -150,23 +150,23 @@ async def uno(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['menu_owner'] = user_id
     
 # --- ОБРАБОТЧИКИ КНОПОК (С БЛОКИРОВКОЙ ДЛЯ ДРУГИХ ИГРОКОВ) ---
+# --- ОБРАБОТЧИКИ КНОПОК (С БЛОКИРОВКОЙ) ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = update.effective_user.id
     
-    # Проверяем, есть ли у сообщения владелец
-    if query.message and query.message.reply_markup:
-        # Если сообщение содержит данные о владельце
-        if hasattr(query.message, 'owner_id') and query.message.owner_id != user_id:
-            await query.answer("❌ Это не твоё меню!", show_alert=True)
-            return
+    # === БЛОКИРОВКА ДЛЯ ДРУГИХ ИГРОКОВ ===
+    # Проверяем, кто владелец текущего меню
+    if context.user_data.get('menu_owner') and context.user_data['menu_owner'] != user_id:
+        await query.answer("❌ Это не твоё меню!", show_alert=True)
+        return
     
     await query.answer()
     data = query.data
     
     if data == "menu":
         keyboard = [
-            [InlineKeyboardButton("🃏 УНО", callback_data="game_uno")],
+            [InlineKeyboardButton("🎮 Игры", callback_data="games_menu")],
             [InlineKeyboardButton("👤 Профиль", callback_data="profile")],
             [InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
             [InlineKeyboardButton("📖 Помощь", callback_data="help")]
@@ -182,9 +182,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "🎮 **Главное меню**"
         
-        # Сохраняем владельца сообщения
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-        # Добавляем владельца в контекст
+        context.user_data['menu_owner'] = user_id
+    
+    elif data == "games_menu":
+        keyboard = [
+            [InlineKeyboardButton("🃏 УНО", callback_data="game_uno")],
+            [InlineKeyboardButton("🏠 Назад", callback_data="menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "🎮 **Выбери игру:**"
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        context.user_data['menu_owner'] = user_id
+    
+    elif data == "game_uno":
+        await query.edit_message_text("🃏 **Игра УНО**\n\nИгра скоро будет доступна!\nПодготовка идёт...", parse_mode='Markdown')
         context.user_data['menu_owner'] = user_id
     
     elif data == "profile":
@@ -231,12 +243,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-        context.user_data['menu_owner'] = user_id
-    
-    elif data == "game_uno":
-        await query.edit_message_text("🃏 **Игра УНО**\n\nИгра скоро будет доступна!\nПодготовка идёт...", parse_mode='Markdown')
-        context.user_data['menu_owner'] = user_id
-        
+        context.user_data['menu_owner'] = user_id 
 # --- ГЛАВНАЯ ФУНКЦИЯ ---
 def main():
     app = Application.builder().token(TOKEN).build()
