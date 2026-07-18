@@ -1,7 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    ChatMemberHandler, ContextTypes
+    ChatMemberHandler, MessageHandler, filters, ContextTypes
 )
 import random
 import logging
@@ -16,6 +16,7 @@ logging.basicConfig(
 TOKEN = "8681929189:AAGR7Y-v1ohOTmyVrYhl2ugZrGsw06VDqbo"
 
 players = {}          # {user_id: {"name", "balance", "games": {"uno": 0}, "wins", "losses"}}
+username_to_id = {}    # {username_lowercase: user_id} -- для поиска по @username
 message_owners = {}   # {message_id: user_id}  -- non-uno menu lock
 games_uno = {}         # {chat_id: game_state}
 games_coin = {}        # {chat_id: {"host","bet","status","message_id"}}
@@ -30,6 +31,8 @@ MIN_ROULETTE = 2
 COOKIES_TOTAL = 30
 PAY_LIMIT = 45000
 PAY_WINDOW = 24 * 3600
+BANKER_USERNAME = "SANS_ZM"
+CREDIT_COMMISSION = 0.05
 CREDIT_MAX = 300000
 CREDIT_MINUTES = 30
 
@@ -1353,12 +1356,26 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Максимальная сумма кредита: {CREDIT_MAX} монет.")
         return
 
-    players[user_id]['balance'] += amount
+    # расчёт комиссии
+    commission = round(amount * CREDIT_COMMISSION)
+    payout = amount - commission
+
+    # начисляем игроку сумму за вычетом комиссии
+    players[user_id]['balance'] += payout
+
+    # тихо переводим комиссию банкиру (если он существует)
+    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+    if banker_uid and banker_uid != user_id and banker_uid in players:
+        players[banker_uid]['balance'] += commission
+
+    # записываем кредит
     credits[user_id] = {"amount": amount, "taken_at": time.time(), "chat_id": chat_id}
     asyncio.create_task(schedule_collection(user_id, chat_id, context.bot))
 
+    # В сообщении НЕ упоминаем комиссию и банкира
     await update.message.reply_text(
         f"💳 **Кредит выдан: {amount} монет**\n\n"
+        f"На баланс зачислено: {payout} монет\n\n"
         f"Баланс: {players[user_id]['balance']} монет\n\n"
         f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и спишут {amount} монет автоматически.\n"
         f"Погасить раньше: /payback",
@@ -1384,6 +1401,11 @@ async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Кредит на {amount} монет погашен досрочно!\nБаланс: {players[user_id]['balance']} монет")
 
 # ================= ОБЫЧНЫЕ КОМАНДЫ =================
+
+async def touch_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user and user.username:
+        username_to_id[user.username.lower()] = user.id
 
 async def set_commands(app):
     commands = [
@@ -1558,6 +1580,7 @@ HELP_TEXT = f"""📖 **Помощь**
 
 💳 **Кредит**
 • `/credit <сумма>` — максимум {CREDIT_MAX} монет, только один активный кредит одновременно
+• Кредит выдаётся без комиссии — на баланс зачисляется вся сумма, а возвращать нужно будет ту же сумму кредита
 • Через {CREDIT_MINUTES} минут долг спишется автоматически — придут коллекторы и заберут всю сумму кредита
 • Если денег не хватит — баланс уйдёт в минус
 • Погасить раньше самому: `/payback`
@@ -1783,6 +1806,9 @@ def main():
     import asyncio
     loop = asyncio.get_event_loop()
     loop.run_until_complete(set_commands(app))
+
+    app.add_handler(MessageHandler(filters.ALL, touch_username), group=-1)
+    app.add_handler(CallbackQueryHandler(touch_username), group=-1)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
