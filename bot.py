@@ -57,6 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Выбери игру или действие:"""
 
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    context.user_data['menu_owner'] = user_id
 
 # --- ПРОФИЛЬ ---
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,18 +82,20 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    context.user_data['menu_owner'] = user_id
 
 # --- РЕЙТИНГ ---
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
     if not players:
         await update.message.reply_text("📭 Пока нет игроков!")
         return
     
-    # Сортируем по балансу
     sorted_players = sorted(players.items(), key=lambda x: x[1]['balance'], reverse=True)
     
     text = "🏆 **ТОП ИГРОКОВ**\n\n"
-    for i, (user_id, data) in enumerate(sorted_players[:10], 1):
+    for i, (uid, data) in enumerate(sorted_players[:10], 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
         text += f"{medal} {data['name']} — {data['balance']} монет\n"
     
@@ -100,9 +103,12 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    context.user_data['menu_owner'] = user_id
 
 # --- ПОМОЩЬ ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
     text = """📖 **Помощь**
 
 🃏 **УНО** — классическая карточная игра
@@ -115,9 +121,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    context.user_data['menu_owner'] = user_id
 
 # --- ОБРАБОТЧИК КОМАНДЫ /games ---
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
     text = """🎮 **Доступные игры**
 
 🃏 **УНО** — классическая карточная игра
@@ -131,18 +140,29 @@ async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    context.user_data['menu_owner'] = user_id
 
 # --- ОБРАБОТЧИК КОМАНДЫ /uno ---
 async def uno(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
     await update.message.reply_text("🃏 **Игра УНО**\n\nИгра скоро будет доступна!\nПодготовка идёт...", parse_mode='Markdown')
-
-# --- ОБРАБОТЧИКИ КНОПОК ---
+    context.user_data['menu_owner'] = user_id
+    
+# --- ОБРАБОТЧИКИ КНОПОК (С БЛОКИРОВКОЙ ДЛЯ ДРУГИХ ИГРОКОВ) ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    
-    data = query.data
     user_id = update.effective_user.id
+    
+    # Проверяем, есть ли у сообщения владелец
+    if query.message and query.message.reply_markup:
+        # Если сообщение содержит данные о владельце
+        if hasattr(query.message, 'owner_id') and query.message.owner_id != user_id:
+            await query.answer("❌ Это не твоё меню!", show_alert=True)
+            return
+    
+    await query.answer()
+    data = query.data
     
     if data == "menu":
         keyboard = [
@@ -162,7 +182,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "🎮 **Главное меню**"
         
+        # Сохраняем владельца сообщения
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        # Добавляем владельца в контекст
+        context.user_data['menu_owner'] = user_id
     
     elif data == "profile":
         if user_id not in players:
@@ -182,17 +205,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        context.user_data['menu_owner'] = user_id
     
     elif data == "top":
         sorted_players = sorted(players.items(), key=lambda x: x[1]['balance'], reverse=True)
         text = "🏆 **ТОП ИГРОКОВ**\n\n"
-        for i, (user_id, data) in enumerate(sorted_players[:10], 1):
+        for i, (uid, data) in enumerate(sorted_players[:10], 1):
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
             text += f"{medal} {data['name']} — {data['balance']} монет\n"
         
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        context.user_data['menu_owner'] = user_id
     
     elif data == "help":
         text = """📖 **Помощь**
@@ -206,10 +231,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        context.user_data['menu_owner'] = user_id
     
     elif data == "game_uno":
         await query.edit_message_text("🃏 **Игра УНО**\n\nИгра скоро будет доступна!\nПодготовка идёт...", parse_mode='Markdown')
-
+        context.user_data['menu_owner'] = user_id
+        
 # --- ГЛАВНАЯ ФУНКЦИЯ ---
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -229,7 +256,7 @@ def main():
     # Обработка кнопок
     app.add_handler(CallbackQueryHandler(callback_handler))
     
-    print("🎮 Бот Agent запущен!")
+    print("🎮 Бот Agent Bot запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
