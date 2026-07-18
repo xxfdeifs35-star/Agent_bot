@@ -5,6 +5,7 @@ from telegram.ext import (
 )
 import random
 import logging
+import time
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,15 +19,16 @@ message_owners = {}   # {message_id: user_id}  -- non-uno menu lock
 games_uno = {}         # {chat_id: game_state}
 games_coin = {}        # {chat_id: {"host","bet","status","message_id"}}
 games_roulette = {}    # {chat_id: game_state}
-games_roulette = {}    # {chat_id: {"host","bet","players","status","message_id"}}
+games_cookies = {}     # {chat_id: game_state}
 chat_players = {}      # {chat_id: set(user_id)} -- кто играл в этом чате
 
 MAX_PLAYERS = 4
 MIN_PLAYERS = 2
 MAX_ROULETTE = 6
 MIN_ROULETTE = 2
-MAX_ROULETTE = 6
-MIN_ROULETTE = 2
+COOKIES_TOTAL = 30
+PAY_LIMIT = 45000
+PAY_WINDOW = 24 * 3600
 
 # ================= УНО: КОЛОДА И ЛОГИКА =================
 
@@ -827,6 +829,370 @@ async def stop_roulette_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     del games_roulette[chat_id]
     await update.message.reply_text("⛔ Русская рулетка остановлена, ставки возвращены.")
+
+# ================= ПЕРЕВОД МОНЕТ =================
+
+def sent_last_24h(uid):
+    now = time.time()
+    log = players[uid].setdefault('transfer_log', [])
+    log[:] = [(ts, amt) for ts, amt in log if now - ts < PAY_WINDOW]
+    return sum(amt for _, amt in log)
+
+async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sender_id = update.effective_user.id
+
+    if sender_id not in players:
+        players[sender_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            "💸 Чтобы перевести монеты — ответь на сообщение игрока командой:\n`/pay <сумма>`",
+            parse_mode='Markdown'
+        )
+        return
+
+    target_user = update.message.reply_to_message.from_user
+    if target_user.is_bot:
+        await update.message.reply_text("❌ Нельзя переводить монеты боту.")
+        return
+    if target_user.id == sender_id:
+        await update.message.reply_text("❌ Нельзя переводить монеты самому себе.")
+        return
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: `/pay <сумма>` (ответом на сообщение игрока)", parse_mode='Markdown')
+        return
+
+    amount = int(args[0])
+    if amount <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
+        return
+    if players[sender_id]['balance'] < amount:
+        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[sender_id]['balance']}")
+        return
+
+    already_sent = sent_last_24h(sender_id)
+    if already_sent + amount > PAY_LIMIT:
+        remaining = PAY_LIMIT - already_sent
+        await update.message.reply_text(
+            f"❌ Превышен лимит переводов: {PAY_LIMIT} монет за 24 часа.\n"
+            f"Уже отправлено за последние 24ч: {already_sent}\nОсталось доступно: {max(remaining, 0)}"
+        )
+        return
+
+    if target_user.id not in players:
+        players[target_user.id] = {
+            "name": target_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+
+    players[sender_id]['balance'] -= amount
+    players[target_user.id]['balance'] += amount
+    players[sender_id].setdefault('transfer_log', []).append((time.time(), amount))
+
+    await update.message.reply_text(
+        f"💸 {players[sender_id]['name']} перевёл {amount} монет игроку {players[target_user.id]['name']}!"
+    )
+
+# ================= ОТРАВЛЕННЫЕ ПЕЧЕНЬКИ =================
+
+def cookies_challenge_text(state):
+    return (f"🍪 **Отравленные печеньки**\n\n"
+            f"Вызов от {players[state['host']]['name']}\n"
+            f"Ставка: {state['bet']} монет\n\n"
+            f"Правила: каждый тайно травит одну печеньку из {COOKIES_TOTAL} в личке боту, "
+            f"потом едим по очереди — кто съест отравленную, тот проигрывает.\n\n"
+            f"Кто примет вызов?")
+
+def cookies_board_keyboard(state, disabled=False):
+    keyboard = []
+    row = []
+    for i in range(1, COOKIES_TOTAL + 1):
+        if i in state['eaten']:
+            label = "✅"
+            cb = "cook_noop"
+        else:
+            label = "🍪"
+            cb = f"cook_noop" if disabled else f"cook_eat_{i}"
+        row.append(InlineKeyboardButton(label, callback_data=cb))
+        if len(row) == 6:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
+
+def cookies_poison_keyboard(chat_id, prefix):
+    keyboard = []
+    row = []
+    for i in range(1, COOKIES_TOTAL + 1):
+        row.append(InlineKeyboardButton(str(i), callback_data=f"{prefix}_{chat_id}_{i}"))
+        if len(row) == 6:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
+
+async def cookies_board_text(state):
+    current_uid = state['host'] if state['turn'] == 'host' else state['opponent']
+    return (f"🍪 **Отравленные печеньки**\n\n"
+            f"💰 Банк: {state['bet'] * 2} монет\n"
+            f"Съедено: {len(state['eaten'])}/{COOKIES_TOTAL}\n\n"
+            f"▶️ Ход: **{players[current_uid]['name']}**\n\n"
+            f"Выбирай печеньку!")
+
+async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+
+    if games_cookies.get(chat_id) and games_cookies[chat_id]['status'] != 'done':
+        await update.message.reply_text("⚠️ В этом чате уже есть открытая игра в печеньки!")
+        return
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /cookies <ставка>\nНапример: /cookies 100")
+        return
+
+    bet = int(args[0])
+    if bet <= 0:
+        await update.message.reply_text("❌ Ставка должна быть больше нуля.")
+        return
+    if players[user_id]['balance'] < bet:
+        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
+        return
+
+    if not await can_dm(user_id, context):
+        me = await context.bot.get_me()
+        keyboard = [[InlineKeyboardButton("✉️ Открыть личку с ботом", url=f"https://t.me/{me.username}")]]
+        await update.message.reply_text(
+            "❌ Нужно сначала написать боту в личку /start — травить печеньки нужно там.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    state = {
+        "host": user_id, "opponent": None, "bet": bet, "status": "waiting",
+        "host_poison": None, "opp_poison": None, "eaten": set(), "turn": "host",
+        "chat_id": chat_id, "message_id": None,
+    }
+    games_cookies[chat_id] = state
+
+    keyboard = [
+        [InlineKeyboardButton("🍪 Принять вызов", callback_data="cook_join")],
+        [InlineKeyboardButton("❌ Отменить", callback_data="cook_cancel")]
+    ]
+    msg = await update.message.reply_text(cookies_challenge_text(state), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    state['message_id'] = msg.message_id
+
+async def finish_cookies(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE, reason: str, draw=False):
+    state = games_cookies[chat_id]
+    if draw:
+        players[state['host']]['balance'] += state['bet']
+        players[state['opponent']]['balance'] += state['bet']
+        text = f"🍪 **Ничья!** {reason}\nСтавки возвращены."
+    else:
+        loser_uid = state['opponent'] if winner_uid == state['host'] else state['host']
+        players[winner_uid]['balance'] += state['bet'] * 2
+        players[winner_uid]['wins'] += 1
+        players[loser_uid]['losses'] += 1
+        text = f"🍪 **{reason}**\n\n🏆 Победитель: {players[winner_uid]['name']} (+{state['bet']} монет)"
+    try:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=state['message_id'], text=text, parse_mode='Markdown')
+    except Exception:
+        pass
+    state['status'] = 'done'
+    del games_cookies[chat_id]
+
+async def cookies_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    data = query.data
+
+    if data == "cook_noop":
+        await query.answer()
+        return
+
+    if data == "cook_join":
+        chat_id = update.effective_chat.id
+        state = games_cookies.get(chat_id)
+        if not state or state['status'] != 'waiting':
+            await query.answer("❌ Вызов не найден", show_alert=True)
+            return
+        if user_id == state['host']:
+            await query.answer("❌ Нельзя принять свой же вызов!", show_alert=True)
+            return
+        if user_id not in players:
+            players[user_id] = {
+                "name": update.effective_user.full_name,
+                "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            }
+        if players[user_id]['balance'] < state['bet']:
+            await query.answer(f"❌ Недостаточно монет. Нужно: {state['bet']}", show_alert=True)
+            return
+        if not await can_dm(user_id, context):
+            await query.answer("❌ Сначала напиши боту в личку /start!", show_alert=True)
+            return
+
+        state['opponent'] = user_id
+        state['status'] = 'host_poison'
+        players[state['host']]['balance'] -= state['bet']
+        players[user_id]['balance'] -= state['bet']
+        await query.answer("Вызов принят!")
+        await query.edit_message_text(
+            "🍪 **Игра началась!**\n\nИгроки тайно травят печеньки в личке боту...", parse_mode='Markdown'
+        )
+        try:
+            await context.bot.send_message(
+                state['host'], "🍪 Выбери печеньку (1-30), которую отравишь для соперника:",
+                reply_markup=cookies_poison_keyboard(chat_id, "cook_hp")
+            )
+        except Exception:
+            pass
+        return
+
+    if data == "cook_cancel":
+        chat_id = update.effective_chat.id
+        state = games_cookies.get(chat_id)
+        if not state or state['status'] != 'waiting':
+            await query.answer("❌ Нельзя отменить сейчас", show_alert=True)
+            return
+        if user_id != state['host']:
+            await query.answer("❌ Только автор вызова может отменить", show_alert=True)
+            return
+        del games_cookies[chat_id]
+        await query.answer("Вызов отменён")
+        await query.edit_message_text("❌ Вызов в печеньки отменён.")
+        return
+
+    if data.startswith("cook_hp_"):
+        _, _, chat_id_str, num_str = data.split("_")
+        chat_id = int(chat_id_str)
+        num = int(num_str)
+        state = games_cookies.get(chat_id)
+        if not state or state['status'] != 'host_poison' or user_id != state['host']:
+            await query.answer("❌ Недоступно", show_alert=True)
+            return
+        state['host_poison'] = num
+        state['status'] = 'opp_poison'
+        await query.answer(f"Печенька №{num} отравлена!")
+        await query.edit_message_text(f"☠️ Ты отравил печеньку №{num}. Ждём соперника...")
+        try:
+            await context.bot.send_message(
+                state['opponent'], "🍪 Выбери печеньку (1-30), которую отравишь для соперника:",
+                reply_markup=cookies_poison_keyboard(chat_id, "cook_op")
+            )
+        except Exception:
+            pass
+        return
+
+    if data.startswith("cook_op_"):
+        _, _, chat_id_str, num_str = data.split("_")
+        chat_id = int(chat_id_str)
+        num = int(num_str)
+        state = games_cookies.get(chat_id)
+        if not state or state['status'] != 'opp_poison' or user_id != state['opponent']:
+            await query.answer("❌ Недоступно", show_alert=True)
+            return
+        state['opp_poison'] = num
+        state['status'] = 'eating'
+        await query.answer(f"Печенька №{num} отравлена!")
+        await query.edit_message_text(f"☠️ Ты отравил печеньку №{num}. Начинаем есть!")
+        try:
+            msg = await context.bot.send_message(
+                chat_id, await cookies_board_text(state),
+                reply_markup=cookies_board_keyboard(state), parse_mode='Markdown'
+            )
+            state['message_id'] = msg.message_id
+        except Exception:
+            pass
+        return
+
+    if data.startswith("cook_eat_"):
+        chat_id = update.effective_chat.id
+        state = games_cookies.get(chat_id)
+        if not state or state['status'] != 'eating':
+            await query.answer("❌ Игра не найдена", show_alert=True)
+            return
+        current_uid = state['host'] if state['turn'] == 'host' else state['opponent']
+        if user_id != current_uid:
+            await query.answer("❌ Сейчас не твой ход!", show_alert=True)
+            return
+        num = int(data.split("_")[2])
+        if num in state['eaten']:
+            await query.answer("❌ Эта печенька уже съедена", show_alert=True)
+            return
+
+        state['eaten'].add(num)
+        await query.answer()
+
+        if num == state['host_poison'] and num == state['opp_poison']:
+            await finish_cookies(chat_id, None, context, f"Печенька №{num} была отравлена с обеих сторон!", draw=True)
+            return
+        if num == state['host_poison']:
+            eater_is_host = (current_uid == state['host'])
+            winner = state['host'] if eater_is_host else state['host']
+            winner = state['host'] if not eater_is_host else state['opponent']
+            await finish_cookies(chat_id, winner, context, f"💀 Печенька №{num} была отравлена!")
+            return
+        if num == state['opp_poison']:
+            eater_is_opp = (current_uid == state['opponent'])
+            winner = state['opponent'] if not eater_is_opp else state['host']
+            await finish_cookies(chat_id, winner, context, f"💀 Печенька №{num} была отравлена!")
+            return
+
+        state['turn'] = 'opponent' if state['turn'] == 'host' else 'host'
+        try:
+            await query.edit_message_text(
+                await cookies_board_text(state), reply_markup=cookies_board_keyboard(state), parse_mode='Markdown'
+            )
+        except Exception:
+            pass
+        return
+
+async def stop_cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    state = games_cookies.get(chat_id)
+
+    if not state or state['status'] == 'done':
+        await update.message.reply_text("📭 В этом чате сейчас нет игры в печеньки.")
+        return
+
+    allowed = user_id in (state['host'], state['opponent'])
+    if not allowed and update.effective_chat.type != "private":
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        allowed = member.status in ("administrator", "creator")
+    if not allowed:
+        await update.message.reply_text("❌ Остановить игру может только участник или админ группы.")
+        return
+
+    if state['opponent']:
+        players[state['host']]['balance'] += state['bet']
+        players[state['opponent']]['balance'] += state['bet']
+
+    try:
+        if state.get('message_id'):
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=state['message_id'],
+                text="⛔ **Игра в печеньки остановлена, ставки возвращены.**", parse_mode='Markdown'
+            )
+    except Exception:
+        pass
+
+    del games_cookies[chat_id]
+    await update.message.reply_text("⛔ Игра в печеньки остановлена, ставки возвращены.")
 
 # ================= ОБЫЧНЫЕ КОМАНДЫ =================
 
