@@ -16,6 +16,7 @@ TOKEN = "8681929189:AAGR7Y-v1ohOTmyVrYhl2ugZrGsw06VDqbo"
 players = {}          # {user_id: {"name", "balance", "games": {"uno": 0}, "wins", "losses"}}
 message_owners = {}   # {message_id: user_id}  -- non-uno menu lock
 games_uno = {}         # {chat_id: game_state}
+games_coin = {}        # {chat_id: {"host","bet","status","message_id"}}
 
 MAX_PLAYERS = 4
 MIN_PLAYERS = 2
@@ -113,9 +114,29 @@ def lobby_keyboard(state):
     keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="uno_cancel")])
     return InlineKeyboardMarkup(keyboard)
 
+async def can_dm(user_id, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        msg = await context.bot.send_message(user_id, "🤖 Проверка личных сообщений...")
+        try:
+            await context.bot.delete_message(user_id, msg.message_id)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
 async def create_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+
+    if not await can_dm(user_id, context):
+        me = await context.bot.get_me()
+        keyboard = [[InlineKeyboardButton("✉️ Открыть личку с ботом", url=f"https://t.me/{me.username}")]]
+        await update.message.reply_text(
+            "❌ Чтобы играть в УНО, сначала напиши боту в личку /start — карты приходят туда.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
 
     if user_id not in players:
         players[user_id] = {
@@ -285,6 +306,12 @@ async def uno_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if len(state['players']) >= MAX_PLAYERS:
             await query.answer("❌ Лобби заполнено (макс. 4)", show_alert=True)
             return
+        if not await can_dm(user_id, context):
+            me = await context.bot.get_me()
+            await query.answer(
+                "❌ Сначала напиши боту в личку /start — карты приходят туда!", show_alert=True
+            )
+            return
         if user_id not in players:
             players[user_id] = {
                 "name": update.effective_user.full_name,
@@ -414,6 +441,108 @@ async def uno_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await refresh_all_hands(chat_id, context)
         return
 
+# ================= ОРЁЛ ИЛИ РЕШКА =================
+
+def coin_text(state, result=None):
+    if result is None:
+        return (f"🪙 **Орёл или Решка**\n\n"
+                f"Вызов от {players[state['host']]['name']}\n"
+                f"Ставка: {state['bet']} монет\n\n"
+                f"Кто примет вызов?")
+    winner_uid, side = result
+    loser_uid = state['host'] if winner_uid != state['host'] else state['opponent']
+    return (f"🪙 **{'Орёл' if side == 'eagle' else 'Решка'}!**\n\n"
+            f"🏆 Победитель: {players[winner_uid]['name']} (+{state['bet']} монет)\n"
+            f"😢 Проигравший: {players[loser_uid]['name']} (-{state['bet']} монет)")
+
+async def coin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+
+    if games_coin.get(chat_id) and games_coin[chat_id]['status'] == 'waiting':
+        await update.message.reply_text("⚠️ В этом чате уже есть открытый вызов Орёл/Решка!")
+        return
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /coin <ставка>\nНапример: /coin 100")
+        return
+
+    bet = int(args[0])
+    if bet <= 0:
+        await update.message.reply_text("❌ Ставка должна быть больше нуля.")
+        return
+    if players[user_id]['balance'] < bet:
+        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
+        return
+
+    state = {"host": user_id, "bet": bet, "status": "waiting", "message_id": None, "opponent": None}
+    games_coin[chat_id] = state
+
+    keyboard = [
+        [InlineKeyboardButton("🎲 Принять вызов", callback_data="coin_join")],
+        [InlineKeyboardButton("❌ Отменить", callback_data="coin_cancel")]
+    ]
+    msg = await update.message.reply_text(coin_text(state), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    state['message_id'] = msg.message_id
+
+async def coin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    data = query.data
+    state = games_coin.get(chat_id)
+
+    if not state or state['status'] != 'waiting':
+        await query.answer("❌ Вызов не найден", show_alert=True)
+        return
+
+    if data == "coin_cancel":
+        if user_id != state['host']:
+            await query.answer("❌ Только автор вызова может отменить", show_alert=True)
+            return
+        del games_coin[chat_id]
+        await query.answer("Вызов отменён")
+        await query.edit_message_text("❌ Вызов Орёл/Решка отменён.")
+        return
+
+    if data == "coin_join":
+        if user_id == state['host']:
+            await query.answer("❌ Нельзя принять свой же вызов!", show_alert=True)
+            return
+        if user_id not in players:
+            players[user_id] = {
+                "name": update.effective_user.full_name,
+                "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            }
+        if players[user_id]['balance'] < state['bet']:
+            await query.answer(f"❌ Недостаточно монет. Нужно: {state['bet']}", show_alert=True)
+            return
+
+        state['opponent'] = user_id
+        state['status'] = 'done'
+        await query.answer()
+
+        players[state['host']]['balance'] -= state['bet']
+        players[user_id]['balance'] -= state['bet']
+
+        side = random.choice(['eagle', 'tail'])
+        winner_uid = state['host'] if side == 'eagle' else user_id
+        players[winner_uid]['balance'] += state['bet'] * 2
+        players[winner_uid]['wins'] += 1
+        loser_uid = user_id if winner_uid == state['host'] else state['host']
+        players[loser_uid]['losses'] += 1
+
+        await query.edit_message_text(coin_text(state, (winner_uid, side)), parse_mode='Markdown')
+        del games_coin[chat_id]
+        return
+
 # ================= ОБЫЧНЫЕ КОМАНДЫ =================
 
 async def set_commands(app):
@@ -423,6 +552,8 @@ async def set_commands(app):
         ("profile", "👤 Мой профиль"),
         ("games", "🎮 Все игры"),
         ("uno", "🃏 Играть в УНО"),
+        ("stopuno", "⛔ Остановить игру УНО"),
+        ("coin", "🪙 Орёл или решка"),
         ("top", "🏆 Рейтинг игроков"),
     ]
     await app.bot.set_my_commands(commands)
@@ -529,9 +660,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """🎮 **Доступные игры**
 
-🃏 **УНО** — карточная игра для 2-4 игроков"""
+🃏 **УНО** — карточная игра для 2-4 игроков
+🪙 **Монетка** — орёл или решка на ставку, 1 на 1"""
     keyboard = [
         [InlineKeyboardButton("🃏 УНО", callback_data="game_uno")],
+        [InlineKeyboardButton("🪙 Монетка", callback_data="game_coin_info")],
         [InlineKeyboardButton("🏠 В меню", callback_data="menu")]
     ]
     msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -539,6 +672,43 @@ async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def uno_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await create_lobby(update, context)
+
+async def stop_uno_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    state = games_uno.get(chat_id)
+
+    if not state:
+        await update.message.reply_text("📭 В этом чате сейчас нет игры УНО.")
+        return
+
+    allowed = user_id == state['host']
+    if not allowed and update.effective_chat.type != "private":
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        allowed = member.status in ("administrator", "creator")
+
+    if not allowed:
+        await update.message.reply_text("❌ Остановить игру может только хост или админ группы.")
+        return
+
+    for uid in state['players']:
+        if uid != user_id:
+            try:
+                await context.bot.send_message(uid, "⛔ Игра УНО была принудительно завершена.")
+            except Exception:
+                pass
+
+    try:
+        if state.get('message_id'):
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=state['message_id'],
+                text="⛔ **Игра УНО остановлена.**", parse_mode='Markdown'
+            )
+    except Exception:
+        pass
+
+    del games_uno[chat_id]
+    await update.message.reply_text("⛔ Игра УНО остановлена.")
 
 # ================= ОБЫЧНЫЙ CALLBACK (МЕНЮ) =================
 
@@ -552,6 +722,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing = games_uno.get(chat_id)
         if existing and existing['status'] in ('waiting', 'active'):
             await query.answer("⚠️ Игра уже идёт в этом чате", show_alert=True)
+            return
+        if not await can_dm(user_id, context):
+            await query.answer("❌ Сначала напиши боту в личку /start — карты приходят туда!", show_alert=True)
             return
         if user_id not in players:
             players[user_id] = {
@@ -597,9 +770,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "games_menu":
         keyboard = [
             [InlineKeyboardButton("🃏 УНО", callback_data="game_uno")],
+            [InlineKeyboardButton("🪙 Монетка", callback_data="game_coin_info")],
             [InlineKeyboardButton("🏠 Назад", callback_data="menu")]
         ]
         await query.edit_message_text("🎮 **Выбери игру:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "game_coin_info":
+        text = """🪙 **Орёл или Решка**
+
+Дуэль на двоих — ставите одинаковую сумму, бот подкидывает монетку, победитель забирает всё.
+
+Использование: `/coin <ставка>`
+Например: `/coin 100`"""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data == "profile":
         if user_id not in players:
@@ -650,10 +834,13 @@ def main():
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("games", games))
     app.add_handler(CommandHandler("uno", uno_command))
+    app.add_handler(CommandHandler("stopuno", stop_uno_command))
+    app.add_handler(CommandHandler("coin", coin_command))
 
     app.add_handler(ChatMemberHandler(on_bot_added_to_group, ChatMemberHandler.MY_CHAT_MEMBER))
 
     app.add_handler(CallbackQueryHandler(uno_callback_handler, pattern="^uno_"))
+    app.add_handler(CallbackQueryHandler(coin_callback_handler, pattern="^coin_"))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     print("🎮 Бот Agent Bot запущен!")
