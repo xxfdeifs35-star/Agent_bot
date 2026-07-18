@@ -934,14 +934,53 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     message_owners[msg.message_id] = user_id
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = """📖 **Помощь**
+HELP_TEXT = """📖 **Помощь**
 
-🃏 **УНО** — играем от 2 до 4 человек в группе. /uno создаёт лобби, кнопка "Присоединиться" добавляет игрока, хост жмёт "Начать игру". Карты приходят в личку.
-👤 **Профиль** — твоя статистика
-🏆 **Рейтинг** — топ игроков"""
+**Общие команды**
+/start — главное меню
+/profile — твой профиль (баланс, победы/поражения)
+/top — рейтинг игроков по балансу
+/games — список всех игр
+/help — эта справка
+
+━━━━━━━━━━━━━━━
+
+🃏 **УНО**
+Карточная игра на 2-4 игрока в группе.
+• `/uno` — создать лобби, кнопка "Присоединиться" добавляет игроков (макс. 4)
+• Хост жмёт "🚀 Начать игру" (нужно минимум 2)
+• Карты и ход приходят каждому игроку в **личку** — поэтому перед игрой нужно написать боту `/start` в личке
+• Ходишь картой того же цвета, значения, или чёрной (Wild)
+• Спецкарты: Skip (пропуск хода), Reverse (смена направления), +2 / +4 (следующий берёт карты и пропускает ход), Wild/+4 позволяют выбрать цвет
+• Побеждает тот, кто первым избавится от всех карт — получает +100 монет
+• `/stopuno` — принудительно остановить игру (хост или админ группы)
+
+━━━━━━━━━━━━━━━
+
+🪙 **Монетка (Орёл или Решка)**
+Дуэль 1 на 1 на ставку.
+• `/coin <ставка>` — например `/coin 100`
+• Хост выбирает сторону (🦅 Орёл или 👑 Решка)
+• Соперник жмёт "🎲 Принять вызов" и автоматически получает противоположную сторону
+• Бот подбрасывает монетку — победитель забирает обе ставки
+
+━━━━━━━━━━━━━━━
+
+🔫 **Русская рулетка**
+От 2 до 6 игроков, до последнего выжившего.
+• `/roulette <ставка>` — например `/roulette 50`, все вносят одинаковую сумму в банк
+• Хост жмёт "🚀 Начать игру" (нужно минимум 2 игрока)
+• По очереди жмёте "🔫 Выстрелить" — шанс выбыть 1 из 6 при каждом выстреле
+• Игра идёт раундами, пока не останется один — он забирает весь банк
+• `/stoproulette` — принудительно остановить, ставки вернутся всем
+
+━━━━━━━━━━━━━━━
+
+💰 Баланс, победы и поражения одни на все игры и не привязаны к конкретной группе — рейтинг `/top` глобальный."""
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
-    msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    msg = await update.message.reply_text(HELP_TEXT, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     message_owners[msg.message_id] = update.effective_user.id
 
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1111,13 +1150,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data == "help":
-        text = """📖 **Помощь**
-
-🃏 **УНО** — играем от 2 до 4 человек в группе. /uno создаёт лобби.
-👤 **Профиль** — твоя статистика
-🏆 **Рейтинг** — топ игроков"""
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text(HELP_TEXT, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 # ================= ГЛАВНАЯ ФУНКЦИЯ =================
 
