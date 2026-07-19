@@ -1,7 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    ChatMemberHandler, MessageHandler, filters, ContextTypes
+    ChatMemberHandler, MessageHandler, filters, ContextTypes, ApplicationHandlerStop
 )
 import random
 import logging
@@ -31,16 +31,21 @@ MIN_PLAYERS = 2
 MAX_ROULETTE = 6
 MIN_ROULETTE = 2
 COOKIES_TOTAL = 30
-PAY_LIMIT = 45000
+PAY_LIMIT = 100000
 CREDIT_MAX = 300000
 BANKER_USERNAME = "SANS_ZM"
-CREDIT_COMMISSION = 0.15
+ADMIN_USERNAME = "SANS_ZM"
+CREDIT_COMMISSION = 1.0
 CREDIT_MINUTES = 30
 USD_START_RATE = 44.0
 USD_UPDATE_SECONDS = 120
 USD_MAX_CHANGE = 0.15
 BTC_START_RATE = 60000.0
 BTC_MAX_CHANGE = 0.10
+UAH_START_RATE = 1.1
+UAH_MAX_CHANGE = 0.12
+EUR_START_RATE = 48.0
+EUR_MAX_CHANGE = 0.12
 MIN_DICE = 2
 MAX_DICE = 6
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
@@ -50,6 +55,8 @@ AUTOSAVE_SECONDS = 15
 credits = {}  # {user_id: {"amount": int, "taken_at": ts, "chat_id": int}}
 usd_rate = USD_START_RATE  # монет за 1 доллар
 btc_rate = BTC_START_RATE  # долларов за 1 BTC
+uah_rate = UAH_START_RATE  # монет за 1 гривну
+eur_rate = EUR_START_RATE  # монет за 1 евро
 games_dice = {}  # {chat_id: game_state}
 
 # ================= БОТЫ-ИГРОКИ (ИИ ОППОНЕНТЫ) =================
@@ -84,6 +91,40 @@ def bots_menu_keyboard(prefix, remaining):
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"{prefix}_bots_back")])
     return InlineKeyboardMarkup(keyboard)
 
+async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Определяет игрока-цель: по ответу на сообщение ИЛИ по @username первым аргументом.
+    Возвращает (user_id, name, rest_args) или (None, None, None) — в этом случае уже отправлено сообщение об ошибке."""
+    if update.message.reply_to_message:
+        u = update.message.reply_to_message.from_user
+        if u.is_bot:
+            await update.message.reply_text("❌ Нельзя указать бота как цель.")
+            return None, None, None
+        if u.id not in players:
+            players[u.id] = {
+                "name": u.full_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            }
+        return u.id, players[u.id]['name'], context.args
+
+    args = context.args
+    if args and args[0].startswith('@'):
+        uname = args[0][1:].lower()
+        uid = username_to_id.get(uname)
+        if not uid:
+            await update.message.reply_text(
+                f"❌ Не нашёл игрока @{args[0][1:]} — он должен хотя бы раз написать боту (например /start), чтобы бот его запомнил."
+            )
+            return None, None, None
+        if uid not in players:
+            players[uid] = {
+                "name": f"@{args[0][1:]}", "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            }
+        return uid, players[uid]['name'], args[1:]
+
+    await update.message.reply_text(
+        "❌ Укажи игрока: ответом на его сообщение, или через @username первым аргументом."
+    )
+    return None, None, None
+
 # ================= СОХРАНЕНИЕ ДАННЫХ =================
 
 def save_data():
@@ -94,6 +135,9 @@ def save_data():
             "username_to_id": username_to_id,
             "usd_rate": usd_rate,
             "btc_rate": btc_rate,
+            "uah_rate": uah_rate,
+            "eur_rate": eur_rate,
+            "banned_users": list(banned_users),
         }
         tmp_path = DATA_FILE + ".tmp"
         with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -103,7 +147,7 @@ def save_data():
         logging.error(f"Ошибка сохранения данных: {e}")
 
 def load_data():
-    global usd_rate, btc_rate
+    global usd_rate, btc_rate, uah_rate, eur_rate
     if not os.path.exists(DATA_FILE):
         return
     try:
@@ -116,6 +160,9 @@ def load_data():
         username_to_id.update(data.get("username_to_id", {}))
         usd_rate = data.get("usd_rate", USD_START_RATE)
         btc_rate = data.get("btc_rate", BTC_START_RATE)
+        uah_rate = data.get("uah_rate", UAH_START_RATE)
+        eur_rate = data.get("eur_rate", EUR_START_RATE)
+        banned_users.update(data.get("banned_users", []))
         logging.info(f"Данные загружены: {len(players)} игроков")
     except Exception as e:
         logging.error(f"Ошибка загрузки данных: {e}")
@@ -811,9 +858,22 @@ async def coin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer()
         keyboard = [
             [InlineKeyboardButton("🎲 Принять вызов", callback_data="coin_join")],
+            [InlineKeyboardButton("🤖 Играть с ботом", callback_data="coin_join_bot")],
             [InlineKeyboardButton("❌ Отменить", callback_data="coin_cancel")]
         ]
         await query.edit_message_text(coin_text(state), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        return
+
+    if data == "coin_join_bot":
+        if state['status'] != 'waiting':
+            await query.answer("❌ Вызов ещё не готов", show_alert=True)
+            return
+        if user_id != state['host']:
+            await query.answer("❌ Только автор вызова может добавить бота", show_alert=True)
+            return
+        await query.answer()
+        bot_uid = create_bot_player()
+        await resolve_coin_join(chat_id, bot_uid, context, query=query)
         return
 
     if data == "coin_join":
@@ -831,25 +891,38 @@ async def coin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if players[user_id]['balance'] < state['bet']:
             await query.answer(f"❌ Недостаточно монет. Нужно: {state['bet']}", show_alert=True)
             return
-
-        state['opponent'] = user_id
-        state['status'] = 'done'
         await query.answer()
-
-        players[state['host']]['balance'] -= state['bet']
-        players[user_id]['balance'] -= state['bet']
-
-        side = random.choice(['eagle', 'tail'])
-        winner_uid = state['host'] if side == state['host_side'] else user_id
-        players[winner_uid]['balance'] += state['bet'] * 2
-        players[winner_uid]['wins'] += 1
-        loser_uid = user_id if winner_uid == state['host'] else state['host']
-        players[loser_uid]['losses'] += 1
-
-        await query.edit_message_text(coin_text(state, (winner_uid, side)), parse_mode='Markdown')
-        await unpin_game_message(context.bot, chat_id, state['message_id'])
-        del games_coin[chat_id]
+        await resolve_coin_join(chat_id, user_id, context, query=query)
         return
+
+async def resolve_coin_join(chat_id, opponent_uid, context: ContextTypes.DEFAULT_TYPE, query=None):
+    state = games_coin.get(chat_id)
+    if not state:
+        return
+    state['opponent'] = opponent_uid
+    state['status'] = 'done'
+
+    players[state['host']]['balance'] -= state['bet']
+    players[opponent_uid]['balance'] -= state['bet']
+
+    side = random.choice(['eagle', 'tail'])
+    winner_uid = state['host'] if side == state['host_side'] else opponent_uid
+    players[winner_uid]['balance'] += state['bet'] * 2
+    players[winner_uid]['wins'] += 1
+    loser_uid = opponent_uid if winner_uid == state['host'] else state['host']
+    players[loser_uid]['losses'] += 1
+
+    text = coin_text(state, (winner_uid, side))
+    if query:
+        await query.edit_message_text(text, parse_mode='Markdown')
+    else:
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=state['message_id'], text=text, parse_mode='Markdown')
+        except Exception:
+            pass
+    await unpin_game_message(context.bot, chat_id, state['message_id'])
+    del games_coin[chat_id]
+    save_data()
 
 async def stop_coin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1537,42 +1610,37 @@ async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
     ensure_usd(sender_id)
 
-    if not update.message.reply_to_message:
+    if not update.message.reply_to_message and not context.args:
         await update.message.reply_text(
-            "💸 Чтобы перевести — ответь на сообщение игрока командой:\n"
-            "`/pay <сумма>` — монеты\n`/pay <сумма> $` — доллары",
+            "💸 Чтобы перевести:\n"
+            "`/pay <сумма>` — ответом на сообщение игрока\n"
+            "`/pay @username <сумма>` — по юзернейму\n"
+            "Добавь `$` в конце для перевода в долларах.",
             parse_mode='Markdown'
         )
         return
 
-    target_user = update.message.reply_to_message.from_user
-    if target_user.is_bot:
-        await update.message.reply_text("❌ Нельзя переводить боту.")
+    target_id, target_name, rest_args = await resolve_target_user(update, context)
+    if target_id is None:
         return
-    if target_user.id == sender_id:
+    if target_id == sender_id:
         await update.message.reply_text("❌ Нельзя переводить самому себе.")
         return
 
-    args = context.args
-    if not args:
+    if not rest_args:
         await update.message.reply_text(
-            "Использование:\n`/pay <сумма>` — монеты\n`/pay <сумма> $` — доллары",
+            "Использование:\n`/pay <сумма>` (или `/pay @username <сумма>`) — монеты\n"
+            "`/pay <сумма> $` (или `/pay @username <сумма> $`) — доллары",
             parse_mode='Markdown'
         )
         return
 
-    in_usd = len(args) > 1 and args[1].lower() in ('$', 'usd', 'доллар', 'доллары', 'долларов')
-
-    if target_user.id not in players:
-        players[target_user.id] = {
-            "name": target_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
-        }
-    ensure_usd(target_user.id)
+    in_usd = len(rest_args) > 1 and rest_args[1].lower() in ('$', 'usd', 'доллар', 'доллары', 'долларов')
+    ensure_usd(target_id)
 
     if in_usd:
         try:
-            amount = float(args[0])
+            amount = float(rest_args[0])
         except ValueError:
             await update.message.reply_text("❌ Введи число, например: /pay 2.5 $")
             return
@@ -1584,31 +1652,30 @@ async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         players[sender_id]['usd'] -= amount
-        players[target_user.id]['usd'] += amount
+        players[target_id]['usd'] += amount
         await update.message.reply_text(
-            f"💸 {players[sender_id]['name']} перевёл {amount} $ игроку {players[target_user.id]['name']}!"
+            f"💸 {players[sender_id]['name']} перевёл {amount} $ игроку {target_name}!"
         )
     else:
-        if not args[0].isdigit():
+        if not rest_args[0].isdigit():
             await update.message.reply_text("❌ Введи целое число монет, например: /pay 500")
             return
-        amount = int(args[0])
+        amount = int(rest_args[0])
         if amount <= 0:
             await update.message.reply_text("❌ Сумма должна быть больше нуля.")
             return
         if players[sender_id]['balance'] < amount:
             await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[sender_id]['balance']}")
             return
-
         if amount > PAY_LIMIT:
             await update.message.reply_text(f"❌ Максимум за один перевод: {PAY_LIMIT} монет.")
             return
 
         players[sender_id]['balance'] -= amount
-        players[target_user.id]['balance'] += amount
+        players[target_id]['balance'] += amount
 
         await update.message.reply_text(
-            f"💸 {players[sender_id]['name']} перевёл {amount} монет игроку {players[target_user.id]['name']}!"
+            f"💸 {players[sender_id]['name']} перевёл {amount} монет игроку {target_name}!"
         )
 
     save_data()
@@ -1706,6 +1773,7 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("🍪 Принять вызов", callback_data="cook_join")],
+        [InlineKeyboardButton("🤖 Играть с ботом", callback_data="cook_join_bot")],
         [InlineKeyboardButton("❌ Отменить", callback_data="cook_cancel")]
     ]
     msg = await update.message.reply_text(cookies_challenge_text(state), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -1731,6 +1799,7 @@ async def finish_cookies(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE
     await unpin_game_message(context.bot, chat_id, state['message_id'])
     state['status'] = 'done'
     del games_cookies[chat_id]
+    save_data()
 
 async def cookies_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1739,6 +1808,20 @@ async def cookies_callback_handler(update: Update, context: ContextTypes.DEFAULT
 
     if data == "cook_noop":
         await query.answer()
+        return
+
+    if data == "cook_join_bot":
+        chat_id = update.effective_chat.id
+        state = games_cookies.get(chat_id)
+        if not state or state['status'] != 'waiting':
+            await query.answer("❌ Вызов не найден", show_alert=True)
+            return
+        if user_id != state['host']:
+            await query.answer("❌ Только автор вызова может добавить бота", show_alert=True)
+            return
+        await query.answer()
+        bot_uid = create_bot_player()
+        await start_cookies_with_opponent(chat_id, bot_uid, context)
         return
 
     if data == "cook_join":
@@ -1761,22 +1844,8 @@ async def cookies_callback_handler(update: Update, context: ContextTypes.DEFAULT
         if not await can_dm(user_id, context):
             await query.answer("❌ Сначала напиши боту в личку /start!", show_alert=True)
             return
-
-        state['opponent'] = user_id
-        state['status'] = 'host_poison'
-        players[state['host']]['balance'] -= state['bet']
-        players[user_id]['balance'] -= state['bet']
         await query.answer("Вызов принят!")
-        await query.edit_message_text(
-            "🍪 **Игра началась!**\n\nИгроки тайно травят печеньки в личке боту...", parse_mode='Markdown'
-        )
-        try:
-            await context.bot.send_message(
-                state['host'], "🍪 Выбери печеньку (1-30), которую отравишь для соперника:",
-                reply_markup=cookies_poison_keyboard(chat_id, "cook_hp")
-            )
-        except Exception:
-            pass
+        await start_cookies_with_opponent(chat_id, user_id, context)
         return
 
     if data == "cook_cancel":
@@ -1803,16 +1872,9 @@ async def cookies_callback_handler(update: Update, context: ContextTypes.DEFAULT
             await query.answer("❌ Недоступно", show_alert=True)
             return
         state['host_poison'] = num
-        state['status'] = 'opp_poison'
         await query.answer(f"Печенька №{num} отравлена!")
         await query.edit_message_text(f"☠️ Ты отравил печеньку №{num}. Ждём соперника...")
-        try:
-            await context.bot.send_message(
-                state['opponent'], "🍪 Выбери печеньку (1-30), которую отравишь для соперника:",
-                reply_markup=cookies_poison_keyboard(chat_id, "cook_op")
-            )
-        except Exception:
-            pass
+        await proceed_after_host_poison(chat_id, context)
         return
 
     if data.startswith("cook_op_"):
@@ -1823,21 +1885,9 @@ async def cookies_callback_handler(update: Update, context: ContextTypes.DEFAULT
         if not state or state['status'] != 'opp_poison' or user_id != state['opponent']:
             await query.answer("❌ Недоступно", show_alert=True)
             return
-        state['opp_poison'] = num
-        state['status'] = 'eating'
         await query.answer(f"Печенька №{num} отравлена!")
         await query.edit_message_text(f"☠️ Ты отравил печеньку №{num}. Начинаем есть!")
-        old_message_id = state['message_id']
-        try:
-            msg = await context.bot.send_message(
-                chat_id, await cookies_board_text(state),
-                reply_markup=cookies_board_keyboard(state), parse_mode='Markdown'
-            )
-            state['message_id'] = msg.message_id
-            await unpin_game_message(context.bot, chat_id, old_message_id)
-            await pin_game_message(context.bot, chat_id, msg.message_id)
-        except Exception:
-            pass
+        await start_cookies_eating(chat_id, num, context)
         return
 
     if data.startswith("cook_eat_"):
@@ -1854,32 +1904,123 @@ async def cookies_callback_handler(update: Update, context: ContextTypes.DEFAULT
         if num in state['eaten']:
             await query.answer("❌ Эта печенька уже съедена", show_alert=True)
             return
-
-        state['eaten'].add(num)
         await query.answer()
-
-        if num == state['host_poison'] and num == state['opp_poison']:
-            await finish_cookies(chat_id, None, context, f"Печенька №{num} была отравлена с обеих сторон!", draw=True)
-            return
-        if num == state['host_poison']:
-            eater_is_host = (current_uid == state['host'])
-            winner = state['host'] if not eater_is_host else state['opponent']
-            await finish_cookies(chat_id, winner, context, f"💀 Печенька №{num} была отравлена!")
-            return
-        if num == state['opp_poison']:
-            eater_is_opp = (current_uid == state['opponent'])
-            winner = state['opponent'] if not eater_is_opp else state['host']
-            await finish_cookies(chat_id, winner, context, f"💀 Печенька №{num} была отравлена!")
-            return
-
-        state['turn'] = 'opponent' if state['turn'] == 'host' else 'host'
-        try:
-            await query.edit_message_text(
-                await cookies_board_text(state), reply_markup=cookies_board_keyboard(state), parse_mode='Markdown'
-            )
-        except Exception:
-            pass
+        await resolve_cookie_eat(chat_id, user_id, num, context)
         return
+
+async def start_cookies_with_opponent(chat_id, opponent_uid, context: ContextTypes.DEFAULT_TYPE):
+    state = games_cookies.get(chat_id)
+    if not state:
+        return
+    state['opponent'] = opponent_uid
+    state['status'] = 'host_poison'
+    players[state['host']]['balance'] -= state['bet']
+    players[opponent_uid]['balance'] -= state['bet']
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=state['message_id'],
+            text="🍪 **Игра началась!**\n\nИгроки тайно травят печеньки в личке боту...", parse_mode='Markdown'
+        )
+    except Exception:
+        pass
+    try:
+        await context.bot.send_message(
+            state['host'], "🍪 Выбери печеньку (1-30), которую отравишь для соперника:",
+            reply_markup=cookies_poison_keyboard(chat_id, "cook_hp")
+        )
+    except Exception:
+        pass
+
+async def proceed_after_host_poison(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    state = games_cookies.get(chat_id)
+    if not state:
+        return
+    state['status'] = 'opp_poison'
+    if is_bot(state['opponent']):
+        num = random.randint(1, COOKIES_TOTAL)
+        await start_cookies_eating(chat_id, num, context)
+        return
+    try:
+        await context.bot.send_message(
+            state['opponent'], "🍪 Выбери печеньку (1-30), которую отравишь для соперника:",
+            reply_markup=cookies_poison_keyboard(chat_id, "cook_op")
+        )
+    except Exception:
+        pass
+
+async def start_cookies_eating(chat_id, opp_poison_num, context: ContextTypes.DEFAULT_TYPE):
+    state = games_cookies.get(chat_id)
+    if not state:
+        return
+    state['opp_poison'] = opp_poison_num
+    state['status'] = 'eating'
+    old_message_id = state['message_id']
+    try:
+        msg = await context.bot.send_message(
+            chat_id, await cookies_board_text(state),
+            reply_markup=cookies_board_keyboard(state), parse_mode='Markdown'
+        )
+        state['message_id'] = msg.message_id
+        await unpin_game_message(context.bot, chat_id, old_message_id)
+        await pin_game_message(context.bot, chat_id, msg.message_id)
+    except Exception:
+        pass
+    await maybe_bot_turn_cookies(chat_id, context)
+
+async def resolve_cookie_eat(chat_id, user_id, num, context: ContextTypes.DEFAULT_TYPE):
+    state = games_cookies.get(chat_id)
+    if not state or state['status'] != 'eating':
+        return
+    current_uid = state['host'] if state['turn'] == 'host' else state['opponent']
+
+    state['eaten'].add(num)
+
+    if num == state['host_poison'] and num == state['opp_poison']:
+        await finish_cookies(chat_id, None, context, f"Печенька №{num} была отравлена с обеих сторон!", draw=True)
+        return
+    if num == state['host_poison']:
+        eater_is_host = (current_uid == state['host'])
+        winner = state['host'] if not eater_is_host else state['opponent']
+        await finish_cookies(chat_id, winner, context, f"💀 Печенька №{num} была отравлена!")
+        return
+    if num == state['opp_poison']:
+        eater_is_opp = (current_uid == state['opponent'])
+        winner = state['opponent'] if not eater_is_opp else state['host']
+        await finish_cookies(chat_id, winner, context, f"💀 Печенька №{num} была отравлена!")
+        return
+
+    state['turn'] = 'opponent' if state['turn'] == 'host' else 'host'
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=state['message_id'],
+            text=await cookies_board_text(state), reply_markup=cookies_board_keyboard(state), parse_mode='Markdown'
+        )
+    except Exception:
+        pass
+    await maybe_bot_turn_cookies(chat_id, context)
+
+async def maybe_bot_turn_cookies(chat_id, context: ContextTypes.DEFAULT_TYPE):
+    state = games_cookies.get(chat_id)
+    if not state or state['status'] != 'eating':
+        return
+    current_uid = state['host'] if state['turn'] == 'host' else state['opponent']
+    if not is_bot(current_uid):
+        return
+    await asyncio.sleep(1.5)
+    state = games_cookies.get(chat_id)
+    if not state or state['status'] != 'eating':
+        return
+    new_current = state['host'] if state['turn'] == 'host' else state['opponent']
+    if new_current != current_uid:
+        return
+
+    own_poison = state['opp_poison'] if current_uid == state['opponent'] else state['host_poison']
+    free_numbers = [n for n in range(1, COOKIES_TOTAL + 1) if n not in state['eaten'] and n != own_poison]
+    if not free_numbers:
+        free_numbers = [n for n in range(1, COOKIES_TOTAL + 1) if n not in state['eaten']]
+    num = random.choice(free_numbers)
+    await resolve_cookie_eat(chat_id, current_uid, num, context)
 
 async def stop_cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1944,7 +2085,10 @@ async def collect_debt(user_id, chat_id, bot):
         await bot.send_message(user_id, text, parse_mode='Markdown')
     except Exception:
         pass
-        
+    save_data()
+    await asyncio.sleep(CREDIT_MINUTES * 60)
+    await collect_debt(user_id, chat_id, bot)
+
 async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -1977,27 +2121,33 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Максимальная сумма кредита: {CREDIT_MAX} монет.")
         return
 
-    # Игрок получает 100% суммы
-    players[user_id]['balance'] += amount
+    # === КОМИССИЯ (РАБОТАЕТ ТИХО, БЕЗ УПОМИНАНИЙ) ===
+    commission = round(amount * CREDIT_COMMISSION)
+    payout = amount - commission
 
-    # Банкир получает 100% от суммы сверху (бонус при выдаче)
+    # Начисляем игроку сумму за вычетом комиссии
+    players[user_id]['balance'] += payout
+
+    # Тихо переводим комиссию банкиру (если он существует)
     banker_uid = username_to_id.get(BANKER_USERNAME.lower())
     if banker_uid and banker_uid != user_id and banker_uid in players:
-        players[banker_uid]['balance'] += amount
+        players[banker_uid]['balance'] += commission
 
     # записываем кредит
     credits[user_id] = {"amount": amount, "taken_at": time.time(), "chat_id": chat_id}
     asyncio.create_task(schedule_collection(user_id, chat_id, context.bot))
 
+    # Сообщение БЕЗ упоминаний о комиссии и банкире
     await update.message.reply_text(
         f"💳 **Кредит выдан: {amount} монет**\n\n"
-        f"На баланс зачислено: {amount} монет\n\n"
+        f"На баланс зачислено: {payout} монет\n\n"
         f"Баланс: {players[user_id]['balance']} монет\n\n"
         f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и спишут {amount} монет автоматически.\n"
         f"Погасить раньше: /payback",
         parse_mode='Markdown'
     )
     save_data()
+
 async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -2023,13 +2173,17 @@ def ensure_usd(uid):
     players[uid].setdefault('usd', 0.0)
 
 async def usd_rate_loop():
-    global usd_rate, btc_rate
+    global usd_rate, btc_rate, uah_rate, eur_rate
     while True:
         await asyncio.sleep(USD_UPDATE_SECONDS)
         change = random.uniform(-USD_MAX_CHANGE, USD_MAX_CHANGE)
         usd_rate = round(max(1.0, usd_rate * (1 + change)), 2)
         btc_change = random.uniform(-BTC_MAX_CHANGE, BTC_MAX_CHANGE)
         btc_rate = round(max(100.0, btc_rate * (1 + btc_change)), 2)
+        uah_change = random.uniform(-UAH_MAX_CHANGE, UAH_MAX_CHANGE)
+        uah_rate = round(max(0.1, uah_rate * (1 + uah_change)), 2)
+        eur_change = random.uniform(-EUR_MAX_CHANGE, EUR_MAX_CHANGE)
+        eur_rate = round(max(1.0, eur_rate * (1 + eur_change)), 2)
 
 async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -2232,7 +2386,273 @@ async def sellbtc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     save_data()
 
+# ================= БИРЖА: ГРИВНА (₴) И ЕВРО (€) =================
+
+def ensure_uah(uid):
+    players[uid].setdefault('uah', 0.0)
+
+def ensure_eur(uid):
+    players[uid].setdefault('eur', 0.0)
+
+async def uahrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"₴ **Курс гривны**\n\n1 ₴ = {uah_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
+        parse_mode='Markdown'
+    )
+
+async def eurrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"€ **Курс евро**\n\n1 € = {eur_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
+        parse_mode='Markdown'
+    )
+
+async def buyuah_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    ensure_uah(user_id)
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(f"Использование: /buyuah <монеты>\nКурс: 1 ₴ = {uah_rate} монет")
+        return
+    coins = int(args[0])
+    if coins <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
+        return
+    if players[user_id]['balance'] < coins:
+        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
+        return
+
+    uah_bought = round(coins / uah_rate, 2)
+    players[user_id]['balance'] -= coins
+    players[user_id]['uah'] += uah_bought
+    await update.message.reply_text(
+        f"₴ Куплено: {uah_bought} ₴ по курсу {uah_rate}\n\nБаланс: {players[user_id]['balance']} монет | {round(players[user_id]['uah'], 2)} ₴"
+    )
+    save_data()
+
+async def selluah_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    ensure_uah(user_id)
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(f"Использование: /selluah <гривны>\nКурс: 1 ₴ = {uah_rate} монет")
+        return
+    try:
+        uah_amount = float(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Введи число.")
+        return
+    if uah_amount <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
+        return
+    if players[user_id]['uah'] < uah_amount:
+        await update.message.reply_text(f"❌ Недостаточно гривен. У тебя: {round(players[user_id]['uah'], 2)} ₴")
+        return
+
+    coins_gained = round(uah_amount * uah_rate)
+    players[user_id]['uah'] -= uah_amount
+    players[user_id]['balance'] += coins_gained
+    await update.message.reply_text(
+        f"₴ Продано: {uah_amount} ₴ по курсу {uah_rate}\n\nПолучено: {coins_gained} монет\n"
+        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['uah'], 2)} ₴"
+    )
+    save_data()
+
+async def buyeur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    ensure_eur(user_id)
+
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(f"Использование: /buyeur <монеты>\nКурс: 1 € = {eur_rate} монет")
+        return
+    coins = int(args[0])
+    if coins <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
+        return
+    if players[user_id]['balance'] < coins:
+        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
+        return
+
+    eur_bought = round(coins / eur_rate, 2)
+    players[user_id]['balance'] -= coins
+    players[user_id]['eur'] += eur_bought
+    await update.message.reply_text(
+        f"€ Куплено: {eur_bought} € по курсу {eur_rate}\n\nБаланс: {players[user_id]['balance']} монет | {round(players[user_id]['eur'], 2)} €"
+    )
+    save_data()
+
+async def selleur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name,
+            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    ensure_eur(user_id)
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(f"Использование: /selleur <евро>\nКурс: 1 € = {eur_rate} монет")
+        return
+    try:
+        eur_amount = float(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Введи число.")
+        return
+    if eur_amount <= 0:
+        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
+        return
+    if players[user_id]['eur'] < eur_amount:
+        await update.message.reply_text(f"❌ Недостаточно евро. У тебя: {round(players[user_id]['eur'], 2)} €")
+        return
+
+    coins_gained = round(eur_amount * eur_rate)
+    players[user_id]['eur'] -= eur_amount
+    players[user_id]['balance'] += coins_gained
+    await update.message.reply_text(
+        f"€ Продано: {eur_amount} € по курсу {eur_rate}\n\nПолучено: {coins_gained} монет\n"
+        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['eur'], 2)} €"
+    )
+    save_data()
+
+# ================= АДМИН-КОМАНДЫ (СКРЫТЫЕ, НЕ В МЕНЮ) =================
+
+banned_users = set()
+
+def is_admin(update: Update):
+    user = update.effective_user
+    return bool(user and user.username and user.username.lower() == ADMIN_USERNAME.lower())
+
+async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, rest_args = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    if not rest_args or not rest_args[0].lstrip('-').isdigit():
+        await update.message.reply_text("Использование: /grant <сумма> (или /grant @username <сумма>), можно отрицательную")
+        return
+    amount = int(rest_args[0])
+    players[target_id]['balance'] += amount
+    save_data()
+    await update.message.reply_text(f"✅ {target_name}: {'+' if amount >= 0 else ''}{amount} монет. Баланс: {players[target_id]['balance']}")
+
+async def setbalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, rest_args = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    if not rest_args or not rest_args[0].lstrip('-').isdigit():
+        await update.message.reply_text("Использование: /setbalance <сумма> (или /setbalance @username <сумма>)")
+        return
+    amount = int(rest_args[0])
+    players[target_id]['balance'] = amount
+    save_data()
+    await update.message.reply_text(f"✅ Баланс {target_name} установлен: {amount} монет")
+
+async def forceend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    chat_id = update.effective_chat.id
+    ended = []
+    for games_dict, name in ((games_uno, "УНО"), (games_coin, "Монетка"), (games_roulette, "Рулетка"),
+                              (games_cookies, "Печеньки"), (games_dice, "Кости")):
+        state = games_dict.get(chat_id)
+        if state:
+            msg_id = state.get('message_id')
+            if msg_id:
+                await unpin_game_message(context.bot, chat_id, msg_id)
+                try:
+                    await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"⛔ Игра {name} принудительно завершена админом.")
+                except Exception:
+                    pass
+            del games_dict[chat_id]
+            ended.append(name)
+    save_data()
+    await update.message.reply_text(f"✅ Завершено: {', '.join(ended) if ended else 'ничего не было запущено'}")
+
+async def resetrates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    global usd_rate, btc_rate, uah_rate, eur_rate
+    usd_rate, btc_rate, uah_rate, eur_rate = USD_START_RATE, BTC_START_RATE, UAH_START_RATE, EUR_START_RATE
+    save_data()
+    await update.message.reply_text("✅ Курсы валют сброшены к стартовым.")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("Использование: /broadcast <текст>")
+        return
+    sent = 0
+    for uid in list(players.keys()):
+        if is_bot(uid):
+            continue
+        try:
+            await context.bot.send_message(uid, f"📢 {text}")
+            sent += 1
+        except Exception:
+            pass
+    await update.message.reply_text(f"✅ Разослано: {sent} игрокам")
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, _ = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    banned_users.add(target_id)
+    save_data()
+    await update.message.reply_text(f"✅ {target_name} забанен.")
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, _ = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    banned_users.discard(target_id)
+    save_data()
+    await update.message.reply_text(f"✅ {target_name} разбанен.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    real_players = [p for uid, p in players.items() if not is_bot(uid)]
+    total_coins = sum(p['balance'] for p in real_players)
+    active_games = sum(len(d) for d in (games_uno, games_coin, games_roulette, games_cookies, games_dice))
+    await update.message.reply_text(
+        f"📊 Игроков: {len(real_players)}\n💰 Монет в обороте: {total_coins}\n"
+        f"🎮 Активных игр: {active_games}\n💳 Открытых кредитов: {len(credits)}\n"
+        f"💱 Курсы: $ {usd_rate} | ₿ {btc_rate} | ₴ {uah_rate} | € {eur_rate}"
+    )
+
 # ================= ОБЫЧНЫЕ КОМАНДЫ =================
+
+async def ban_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user and user.id in banned_users:
+        raise ApplicationHandlerStop
 
 async def touch_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -2264,6 +2684,12 @@ async def set_commands(app):
         ("btcrate", "₿ Курс биткоина"),
         ("buybtc", "₿ Купить биткоин"),
         ("sellbtc", "₿ Продать биткоин"),
+        ("uahrate", "₴ Курс гривны"),
+        ("buyuah", "₴ Купить гривны"),
+        ("selluah", "₴ Продать гривны"),
+        ("eurrate", "€ Курс евро"),
+        ("buyeur", "€ Купить евро"),
+        ("selleur", "€ Продать евро"),
         ("top", "🏆 Рейтинг игроков"),
     ]
     await app.bot.set_my_commands(commands)
@@ -2334,11 +2760,13 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     player = players[user_id]
     usd_line = f"💵 Доллары: {round(player.get('usd', 0), 4)} $\n" if player.get('usd', 0) else ""
     btc_line = f"₿ BTC: {round(player.get('btc', 0), 8)}\n" if player.get('btc', 0) else ""
+    uah_line = f"₴ Гривны: {round(player.get('uah', 0), 2)} ₴\n" if player.get('uah', 0) else ""
+    eur_line = f"€ Евро: {round(player.get('eur', 0), 2)} €\n" if player.get('eur', 0) else ""
     text = f"""👤 **Твой профиль**
 
 📛 Имя: {player['name']}
 💰 Баланс: {player['balance']} монет
-{usd_line}{btc_line}🏆 Побед: {player['wins']}
+{usd_line}{btc_line}{uah_line}{eur_line}🏆 Побед: {player['wins']}
 😢 Поражений: {player['losses']}
 
 📊 Игр сыграно: {player['games']['uno']}"""
@@ -2351,7 +2779,10 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not players:
         await update.message.reply_text("📭 Пока нет игроков!")
         return
-    sorted_players = sorted(players.items(), key=lambda x: x[1]['balance'], reverse=True)
+    sorted_players = sorted(
+        ((uid, p) for uid, p in players.items() if not is_bot(uid)),
+        key=lambda x: x[1]['balance'], reverse=True
+    )
     text = "🏆 **ТОП ИГРОКОВ**\n\n"
     for i, (uid, data) in enumerate(sorted_players[:10], 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
@@ -2434,8 +2865,9 @@ HELP_TEXT = f"""📖 **Помощь**
 
 💳 **Кредит**
 • `/credit <сумма>` — максимум {CREDIT_MAX} монет, только один активный кредит одновременно
-• Кредит выдаётся без комиссии — на баланс зачисляется вся сумма, а возвращать нужно будет ту же сумму кредита
-• Через {CREDIT_MINUTES} минут долг спишется автоматически — придут коллекторы и заберут всю сумму кредита
+• На баланс зачисляется полная сумма без вычетов, и вернуть нужно ровно столько же — кредит честный, без процентов для заёмщика
+• При этом игроку @{BANKER_USERNAME} с каждого кредита отдельно капает 100% суммы бонусом — это его "зарплата" за работу банком
+• Через {CREDIT_MINUTES} минут долг спишется автоматически — придут коллекторы и заберут сумму кредита
 • Если денег не хватит — баланс уйдёт в минус
 • Погасить раньше самому: `/payback`
 
@@ -2458,9 +2890,16 @@ HELP_TEXT = f"""📖 **Помощь**
 
 ━━━━━━━━━━━━━━━
 
-💰 Баланс, победы и поражения одни на все игры и не привязаны к конкретной группе — рейтинг `/top` глобальный.
+₴ **Гривна и € Евро — биржа**
+• `/uahrate`, `/buyuah <монеты>`, `/selluah <гривны>`
+• `/eurrate`, `/buyeur <монеты>`, `/selleur <евро>`
+• Курсы тоже меняются случайно каждые {USD_UPDATE_SECONDS // 60} минуты
+
+━━━━━━━━━━━━━━━
+
+💰 Баланс, победы и поражения одни на все игры и не привязаны к конкретной группе — рейтинг `/top` глобальный (боты в топ не попадают).
 📌 Пока лобби/игра активны, их сообщение закреплено в чате — открепляется автоматически после окончания. Для этого у бота должны быть права на закрепление сообщений в группе.
-🤖 В лобби УНО, Русской рулетки и Костей есть кнопка "Играть с ботом" — можно добить лобби ботами вместо живых игроков, они ходят автоматически."""
+🤖 В УНО, Русской рулетке, Костях, Монетке и Печеньках есть кнопка "Играть с ботом" — можно играть даже в одиночку, боты ходят автоматически."""
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
@@ -2671,7 +3110,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data == "top":
-        sorted_players = sorted(players.items(), key=lambda x: x[1]['balance'], reverse=True)
+        sorted_players = sorted(
+            ((uid, p) for uid, p in players.items() if not is_bot(uid)),
+            key=lambda x: x[1]['balance'], reverse=True
+        )
         text = "🏆 **ТОП ИГРОКОВ**\n\n"
         for i, (uid, pdata) in enumerate(sorted_players[:10], 1):
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
@@ -2694,6 +3136,9 @@ def main():
     acquire_single_instance_lock()
     load_data()
     app = Application.builder().token(TOKEN).post_init(post_init).build()
+
+    app.add_handler(MessageHandler(filters.ALL, ban_gate), group=-2)
+    app.add_handler(CallbackQueryHandler(ban_gate), group=-2)
 
     app.add_handler(MessageHandler(filters.ALL, touch_username), group=-1)
     app.add_handler(CallbackQueryHandler(touch_username), group=-1)
@@ -2720,6 +3165,22 @@ def main():
     app.add_handler(CommandHandler("btcrate", btcrate_command))
     app.add_handler(CommandHandler("buybtc", buybtc_command))
     app.add_handler(CommandHandler("sellbtc", sellbtc_command))
+    app.add_handler(CommandHandler("uahrate", uahrate_command))
+    app.add_handler(CommandHandler("buyuah", buyuah_command))
+    app.add_handler(CommandHandler("selluah", selluah_command))
+    app.add_handler(CommandHandler("eurrate", eurrate_command))
+    app.add_handler(CommandHandler("buyeur", buyeur_command))
+    app.add_handler(CommandHandler("selleur", selleur_command))
+
+    # --- скрытые админ-команды, намеренно НЕ в set_commands() ---
+    app.add_handler(CommandHandler("grant", grant_command))
+    app.add_handler(CommandHandler("setbalance", setbalance_command))
+    app.add_handler(CommandHandler("forceend", forceend_command))
+    app.add_handler(CommandHandler("resetrates", resetrates_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("cookies", cookies_command))
     app.add_handler(CommandHandler("stopcookies", stop_cookies_command))
 
