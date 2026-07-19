@@ -37,26 +37,31 @@ BANKER_USERNAME = "SANS_ZM"
 ADMIN_USERNAME = "SANS_ZM"
 CREDIT_COMMISSION = 1.0
 CREDIT_MINUTES = 30
-USD_START_RATE = 44.0
 USD_UPDATE_SECONDS = 120
-USD_MAX_CHANGE = 0.15
-BTC_START_RATE = 60000.0
-BTC_MAX_CHANGE = 0.10
-UAH_START_RATE = 1.1
-UAH_MAX_CHANGE = 0.12
-EUR_START_RATE = 48.0
-EUR_MAX_CHANGE = 0.12
 MIN_DICE = 2
 MAX_DICE = 6
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.lock")
 AUTOSAVE_SECONDS = 15
 
+# ================= РЕЕСТР ВАЛЮТ (ИМБОВАЯ БИРЖА) =================
+# priced_in: "coins" — курс хранится напрямую в монетах за 1 единицу
+#            <код валюты> — курс хранится в единицах ЭТОЙ валюты (как BTC в $)
+CURRENCIES = {
+    "usd": {"name": "Доллар",              "symbol": "$",  "start": 44.0,    "max_change": 0.15, "priced_in": "coins", "decimals": 4},
+    "eur": {"name": "Евро",                "symbol": "€",  "start": 48.0,    "max_change": 0.12, "priced_in": "coins", "decimals": 2},
+    "uah": {"name": "Гривна",              "symbol": "₴",  "start": 1.1,     "max_change": 0.12, "priced_in": "coins", "decimals": 2},
+    "rub": {"name": "Рубль",               "symbol": "₽",  "start": 0.48,    "max_change": 0.15, "priced_in": "coins", "decimals": 2},
+    "jpy": {"name": "Японская иена",       "symbol": "¥",  "start": 0.29,    "max_change": 0.12, "priced_in": "coins", "decimals": 2},
+    "chf": {"name": "Швейцарский франк",   "symbol": "₣",  "start": 50.0,    "max_change": 0.10, "priced_in": "coins", "decimals": 2},
+    "kwd": {"name": "Кувейтский динар",    "symbol": "KD", "start": 143.0,   "max_change": 0.08, "priced_in": "coins", "decimals": 3},
+    "krw": {"name": "Вона (Ю. Корея)",     "symbol": "₩",  "start": 0.033,   "max_change": 0.12, "priced_in": "coins", "decimals": 2},
+    "btc": {"name": "Биткоин",             "symbol": "₿",  "start": 60000.0, "max_change": 0.10, "priced_in": "usd",   "decimals": 8},
+}
+LEGACY_ALIASES = {"$": "usd", "usd": "usd", "доллар": "usd", "доллары": "usd", "долларов": "usd"}
+
 credits = {}  # {user_id: {"amount": int, "taken_at": ts, "chat_id": int}}
-usd_rate = USD_START_RATE  # монет за 1 доллар
-btc_rate = BTC_START_RATE  # долларов за 1 BTC
-uah_rate = UAH_START_RATE  # монет за 1 гривну
-eur_rate = EUR_START_RATE  # монет за 1 евро
+rates = {code: info["start"] for code, info in CURRENCIES.items()}  # живые курсы
 games_dice = {}  # {chat_id: game_state}
 
 # ================= БОТЫ-ИГРОКИ (ИИ ОППОНЕНТЫ) =================
@@ -133,10 +138,7 @@ def save_data():
             "players": {str(uid): p for uid, p in players.items()},
             "credits": {str(uid): c for uid, c in credits.items()},
             "username_to_id": username_to_id,
-            "usd_rate": usd_rate,
-            "btc_rate": btc_rate,
-            "uah_rate": uah_rate,
-            "eur_rate": eur_rate,
+            "rates": rates,
             "banned_users": list(banned_users),
         }
         tmp_path = DATA_FILE + ".tmp"
@@ -147,21 +149,32 @@ def save_data():
         logging.error(f"Ошибка сохранения данных: {e}")
 
 def load_data():
-    global usd_rate, btc_rate, uah_rate, eur_rate
     if not os.path.exists(DATA_FILE):
         return
     try:
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         for uid_str, p in data.get("players", {}).items():
+            # миграция старых отдельных полей (usd/btc/uah/eur) в единый wallet
+            wallet = p.setdefault('wallet', {})
+            for old_code in ('usd', 'btc', 'uah', 'eur'):
+                if old_code in p:
+                    wallet[old_code] = wallet.get(old_code, 0) + p.pop(old_code)
             players[int(uid_str)] = p
         for uid_str, c in data.get("credits", {}).items():
             credits[int(uid_str)] = c
         username_to_id.update(data.get("username_to_id", {}))
-        usd_rate = data.get("usd_rate", USD_START_RATE)
-        btc_rate = data.get("btc_rate", BTC_START_RATE)
-        uah_rate = data.get("uah_rate", UAH_START_RATE)
-        eur_rate = data.get("eur_rate", EUR_START_RATE)
+        saved_rates = data.get("rates")
+        if saved_rates:
+            for code, value in saved_rates.items():
+                if code in rates:
+                    rates[code] = value
+        else:
+            # старый формат сохранения (до имбовой биржи)
+            legacy_map = {"usd_rate": "usd", "btc_rate": "btc", "uah_rate": "uah", "eur_rate": "eur"}
+            for old_key, code in legacy_map.items():
+                if old_key in data:
+                    rates[code] = data[old_key]
         banned_users.update(data.get("banned_users", []))
         logging.info(f"Данные загружены: {len(players)} игроков")
     except Exception as e:
@@ -1608,14 +1621,14 @@ async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "name": update.effective_user.full_name,
             "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
         }
-    ensure_usd(sender_id)
+    ensure_wallet(sender_id)
 
     if not update.message.reply_to_message and not context.args:
         await update.message.reply_text(
             "💸 Чтобы перевести:\n"
             "`/pay <сумма>` — ответом на сообщение игрока\n"
             "`/pay @username <сумма>` — по юзернейму\n"
-            "Добавь `$` в конце для перевода в долларах.",
+            f"Добавь код валюты в конце для перевода не монетами (например `/pay 5 eur`). Доступные: {currency_list_str()}",
             parse_mode='Markdown'
         )
         return
@@ -1630,31 +1643,32 @@ async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rest_args:
         await update.message.reply_text(
             "Использование:\n`/pay <сумма>` (или `/pay @username <сумма>`) — монеты\n"
-            "`/pay <сумма> $` (или `/pay @username <сумма> $`) — доллары",
+            f"`/pay <сумма> <код>` — любая валюта, например `/pay 5 eur`. Доступные: {currency_list_str()}",
             parse_mode='Markdown'
         )
         return
 
-    in_usd = len(rest_args) > 1 and rest_args[1].lower() in ('$', 'usd', 'доллар', 'доллары', 'долларов')
-    ensure_usd(target_id)
+    currency = resolve_currency_code(rest_args[1]) if len(rest_args) > 1 else None
+    ensure_wallet(target_id)
 
-    if in_usd:
+    if currency:
         try:
             amount = float(rest_args[0])
         except ValueError:
-            await update.message.reply_text("❌ Введи число, например: /pay 2.5 $")
+            await update.message.reply_text(f"❌ Введи число, например: /pay 2.5 {currency}")
             return
         if amount <= 0:
             await update.message.reply_text("❌ Сумма должна быть больше нуля.")
             return
-        if players[sender_id]['usd'] < amount:
-            await update.message.reply_text(f"❌ Недостаточно долларов. У тебя: {round(players[sender_id]['usd'], 4)} $")
+        if get_bal(sender_id, currency) < amount:
+            await update.message.reply_text(f"❌ Недостаточно {currency.upper()}. У тебя: {fmt_amount(currency, get_bal(sender_id, currency))}")
             return
 
-        players[sender_id]['usd'] -= amount
-        players[target_id]['usd'] += amount
+        add_bal(sender_id, currency, -amount)
+        add_bal(target_id, currency, amount)
+        info = CURRENCIES[currency]
         await update.message.reply_text(
-            f"💸 {players[sender_id]['name']} перевёл {amount} $ игроку {target_name}!"
+            f"💸 {players[sender_id]['name']} перевёл {amount} {info['symbol']} игроку {target_name}!"
         )
     else:
         if not rest_args[0].isdigit():
@@ -2121,28 +2135,24 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Максимальная сумма кредита: {CREDIT_MAX} монет.")
         return
 
-    # === КОМИССИЯ (РАБОТАЕТ ТИХО, БЕЗ УПОМИНАНИЙ) ===
-    commission = round(amount * CREDIT_COMMISSION)
-    payout = amount - commission
+    # === Игрок получает 100% суммы ===
+    players[user_id]['balance'] += amount
 
-    # Начисляем игроку сумму за вычетом комиссии
-    players[user_id]['balance'] += payout
-
-    # Тихо переводим комиссию банкиру (если он существует)
+    # === Банкир получает 100% от суммы сверху (бонус) ===
     banker_uid = username_to_id.get(BANKER_USERNAME.lower())
     if banker_uid and banker_uid != user_id and banker_uid in players:
-        players[banker_uid]['balance'] += commission
+        players[banker_uid]['balance'] += amount
 
     # записываем кредит
     credits[user_id] = {"amount": amount, "taken_at": time.time(), "chat_id": chat_id}
     asyncio.create_task(schedule_collection(user_id, chat_id, context.bot))
 
-    # Сообщение БЕЗ упоминаний о комиссии и банкире
+    # === Сообщение пользователю ===
     await update.message.reply_text(
         f"💳 **Кредит выдан: {amount} монет**\n\n"
-        f"На баланс зачислено: {payout} монет\n\n"
-        f"Баланс: {players[user_id]['balance']} монет\n\n"
-        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и спишут {amount} монет автоматически.\n"
+        f"💰 На баланс зачислено: {amount} монет\n\n"
+        f"📊 Баланс: {players[user_id]['balance']} монет\n\n"
+        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и выебут тебя на спиздят {amount} монет автоматически.\n"
         f"Погасить раньше: /payback",
         parse_mode='Markdown'
     )
@@ -2167,46 +2177,88 @@ async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Кредит на {amount} монет погашен досрочно!\nБаланс: {players[user_id]['balance']} монет")
     save_data()
 
-# ================= БИРЖА: ДОЛЛАР ($) =================
+# ================= ИМБОВАЯ БИРЖА ВАЛЮТ =================
 
-def ensure_usd(uid):
-    players[uid].setdefault('usd', 0.0)
+def coins_rate(code):
+    """Сколько монет стоит 1 единица валюты code (рекурсивно, если валюта оценена в другой валюте)."""
+    info = CURRENCIES[code]
+    if info["priced_in"] == "coins":
+        return rates[code]
+    return rates[code] * coins_rate(info["priced_in"])
 
-async def usd_rate_loop():
-    global usd_rate, btc_rate, uah_rate, eur_rate
+def ensure_wallet(uid):
+    players[uid].setdefault('wallet', {})
+
+def get_bal(uid, code):
+    return players[uid].get('wallet', {}).get(code, 0)
+
+def add_bal(uid, code, delta):
+    ensure_wallet(uid)
+    players[uid]['wallet'][code] = players[uid]['wallet'].get(code, 0) + delta
+
+def fmt_amount(code, amount):
+    return round(amount, CURRENCIES[code]["decimals"])
+
+def resolve_currency_code(token):
+    token = token.lower().lstrip('/')
+    if token in CURRENCIES:
+        return token
+    return LEGACY_ALIASES.get(token)
+
+def currency_list_str():
+    return ", ".join(f"{c.upper()}" for c in CURRENCIES)
+
+async def rates_loop():
     while True:
         await asyncio.sleep(USD_UPDATE_SECONDS)
-        change = random.uniform(-USD_MAX_CHANGE, USD_MAX_CHANGE)
-        usd_rate = round(max(1.0, usd_rate * (1 + change)), 2)
-        btc_change = random.uniform(-BTC_MAX_CHANGE, BTC_MAX_CHANGE)
-        btc_rate = round(max(100.0, btc_rate * (1 + btc_change)), 2)
-        uah_change = random.uniform(-UAH_MAX_CHANGE, UAH_MAX_CHANGE)
-        uah_rate = round(max(0.1, uah_rate * (1 + uah_change)), 2)
-        eur_change = random.uniform(-EUR_MAX_CHANGE, EUR_MAX_CHANGE)
-        eur_rate = round(max(1.0, eur_rate * (1 + eur_change)), 2)
+        for code, info in CURRENCIES.items():
+            change = random.uniform(-info["max_change"], info["max_change"])
+            floor = 0.01 if info["priced_in"] == "coins" else 1.0
+            rates[code] = round(max(floor, rates[code] * (1 + change)), 4)
+
+async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = ["💱 **Курсы валют** (в монетах)\n"]
+    for code, info in CURRENCIES.items():
+        cr = coins_rate(code)
+        extra = f" ({rates[code]} {CURRENCIES[info['priced_in']]['symbol']})" if info["priced_in"] != "coins" else ""
+        lines.append(f"{info['symbol']} {info['name']} ({code.upper()}): {round(cr, 4)} монет{extra}")
+    lines.append(f"\nОбновляются каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.")
+    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
 
 async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"💵 **Курс доллара**\n\n1 $ = {usd_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
-        parse_mode='Markdown'
-    )
+    args = context.args
+    code = resolve_currency_code(args[0]) if args else "usd"
+    if not code:
+        await update.message.reply_text(f"❌ Неизвестная валюта. Доступные: {currency_list_str()}")
+        return
+    info = CURRENCIES[code]
+    cr = coins_rate(code)
+    text = f"{info['symbol']} **Курс: {info['name']}**\n\n1 {code.upper()} = {round(cr, 4)} монет"
+    if info["priced_in"] != "coins":
+        text += f"\n(1 {code.upper()} = {rates[code]} {CURRENCIES[info['priced_in']]['symbol']})"
+    text += f"\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом."
+    await update.message.reply_text(text, parse_mode='Markdown')
 
-async def buyusd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if user_id not in players:
         players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            "name": update.effective_user.full_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
         }
-    ensure_usd(user_id)
+    ensure_wallet(user_id)
 
     args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(f"Использование: /buyusd <монеты>\nКурс: 1 $ = {usd_rate} монет")
+    if len(args) < 2:
+        await update.message.reply_text(f"Использование: /buy <валюта> <монеты>\nНапример: /buy usd 500\nДоступные: {currency_list_str()}")
         return
-
-    coins = int(args[0])
+    code = resolve_currency_code(args[0])
+    if not code:
+        await update.message.reply_text(f"❌ Неизвестная валюта. Доступные: {currency_list_str()}")
+        return
+    if not args[1].isdigit():
+        await update.message.reply_text("❌ Введи целое число монет.")
+        return
+    coins = int(args[1])
     if coins <= 0:
         await update.message.reply_text("❌ Сумма должна быть больше нуля.")
         return
@@ -2214,323 +2266,169 @@ async def buyusd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
         return
 
-    usd_bought = round(coins / usd_rate, 4)
+    cr = coins_rate(code)
+    bought = coins / cr
     players[user_id]['balance'] -= coins
-    players[user_id]['usd'] += usd_bought
-
+    add_bal(user_id, code, bought)
+    info = CURRENCIES[code]
     await update.message.reply_text(
-        f"💵 Куплено: {usd_bought} $ по курсу {usd_rate}\n\n"
-        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['usd'], 4)} $"
+        f"{info['symbol']} Куплено: {fmt_amount(code, bought)} {code.upper()} по курсу {round(cr, 4)}\n\n"
+        f"Баланс: {players[user_id]['balance']} монет | {fmt_amount(code, get_bal(user_id, code))} {code.upper()}"
     )
     save_data()
 
-async def sellusd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def sell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if user_id not in players:
         players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            "name": update.effective_user.full_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
         }
-    ensure_usd(user_id)
+    ensure_wallet(user_id)
 
     args = context.args
-    if not args:
-        await update.message.reply_text(f"Использование: /sellusd <доллары>\nКурс: 1 $ = {usd_rate} монет")
+    if len(args) < 2:
+        await update.message.reply_text(f"Использование: /sell <валюта> <количество>\nНапример: /sell usd 10\nДоступные: {currency_list_str()}")
         return
-
+    code = resolve_currency_code(args[0])
+    if not code:
+        await update.message.reply_text(f"❌ Неизвестная валюта. Доступные: {currency_list_str()}")
+        return
     try:
-        usd_amount = float(args[0])
+        amount = float(args[1])
     except ValueError:
-        await update.message.reply_text("❌ Введи число, например: /sellusd 2.5")
+        await update.message.reply_text("❌ Введи число.")
         return
-
-    if usd_amount <= 0:
+    if amount <= 0:
         await update.message.reply_text("❌ Сумма должна быть больше нуля.")
         return
-    if players[user_id]['usd'] < usd_amount:
-        await update.message.reply_text(f"❌ Недостаточно долларов. У тебя: {round(players[user_id]['usd'], 4)} $")
+    if get_bal(user_id, code) < amount:
+        await update.message.reply_text(f"❌ Недостаточно {code.upper()}. У тебя: {fmt_amount(code, get_bal(user_id, code))}")
         return
 
-    coins_gained = round(usd_amount * usd_rate)
-    players[user_id]['usd'] -= usd_amount
+    cr = coins_rate(code)
+    coins_gained = round(amount * cr)
+    add_bal(user_id, code, -amount)
     players[user_id]['balance'] += coins_gained
-
+    info = CURRENCIES[code]
     await update.message.reply_text(
-        f"💵 Продано: {usd_amount} $ по курсу {usd_rate}\n\n"
-        f"Получено: {coins_gained} монет\n"
-        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['usd'], 4)} $"
+        f"{info['symbol']} Продано: {amount} {code.upper()} по курсу {round(cr, 4)}\n\n"
+        f"Получено: {coins_gained} монет\nБаланс: {players[user_id]['balance']} монет | {fmt_amount(code, get_bal(user_id, code))} {code.upper()}"
     )
     save_data()
 
-# ================= БИРЖА: BTC =================
-
-def ensure_btc(uid):
-    players[uid].setdefault('btc', 0.0)
-
-async def btcrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"₿ **Курс BTC**\n\n1 BTC = {btc_rate} $ = {round(btc_rate * usd_rate)} монет\n\n"
-        f"Обновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
-        parse_mode='Markdown'
-    )
-
-def parse_currency_arg(args, idx):
-    if len(args) > idx and args[idx].lower() in ('$', 'usd', 'доллар', 'доллары', 'долларов'):
-        return 'usd'
-    return 'coins'
-
-async def buybtc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def exchange_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if user_id not in players:
         players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            "name": update.effective_user.full_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
         }
-    ensure_usd(user_id)
-    ensure_btc(user_id)
+    ensure_wallet(user_id)
 
     args = context.args
-    if not args:
+    if len(args) < 3:
         await update.message.reply_text(
-            "Использование:\n`/buybtc <монеты>` — купить за монеты\n`/buybtc <сумма> $` — купить за доллары\n"
-            f"Курс: 1 BTC = {btc_rate} $ = {round(btc_rate * usd_rate)} монет",
-            parse_mode='Markdown'
+            f"Использование: /exchange <из> <в> <количество>\nНапример: /exchange usd eur 50\nДоступные: {currency_list_str()}"
         )
         return
-
-    currency = parse_currency_arg(args, 1)
+    from_code = resolve_currency_code(args[0])
+    to_code = resolve_currency_code(args[1])
+    if not from_code or not to_code:
+        await update.message.reply_text(f"❌ Неизвестная валюта. Доступные: {currency_list_str()}")
+        return
+    if from_code == to_code:
+        await update.message.reply_text("❌ Нельзя обменять валюту саму на себя.")
+        return
     try:
-        spend = float(args[0])
+        amount = float(args[2])
     except ValueError:
         await update.message.reply_text("❌ Введи число.")
         return
-    if spend <= 0:
+    if amount <= 0:
         await update.message.reply_text("❌ Сумма должна быть больше нуля.")
         return
+    if get_bal(user_id, from_code) < amount:
+        await update.message.reply_text(f"❌ Недостаточно {from_code.upper()}. У тебя: {fmt_amount(from_code, get_bal(user_id, from_code))}")
+        return
 
-    if currency == 'usd':
-        if players[user_id]['usd'] < spend:
-            await update.message.reply_text(f"❌ Недостаточно долларов. У тебя: {round(players[user_id]['usd'], 4)} $")
-            return
-        btc_bought = spend / btc_rate
-        players[user_id]['usd'] -= spend
-        spend_label = f"{spend} $"
-    else:
-        spend = int(spend)
-        if players[user_id]['balance'] < spend:
-            await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
-            return
-        usd_equiv = spend / usd_rate
-        btc_bought = usd_equiv / btc_rate
-        players[user_id]['balance'] -= spend
-        spend_label = f"{spend} монет"
-
-    players[user_id]['btc'] += btc_bought
+    coins_equiv = amount * coins_rate(from_code)
+    to_amount = coins_equiv / coins_rate(to_code)
+    add_bal(user_id, from_code, -amount)
+    add_bal(user_id, to_code, to_amount)
 
     await update.message.reply_text(
-        f"₿ Куплено: {round(btc_bought, 8)} BTC за {spend_label}\n\n"
-        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['usd'], 4)} $ | {round(players[user_id]['btc'], 8)} BTC"
+        f"🔄 Обменяно: {amount} {from_code.upper()} → {fmt_amount(to_code, to_amount)} {to_code.upper()}\n\n"
+        f"{CURRENCIES[from_code]['symbol']} {fmt_amount(from_code, get_bal(user_id, from_code))} {from_code.upper()} | "
+        f"{CURRENCIES[to_code]['symbol']} {fmt_amount(to_code, get_bal(user_id, to_code))} {to_code.upper()}"
     )
     save_data()
 
-async def sellbtc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+# --- команды-алиасы для обратной совместимости (старые названия) ---
 
-    if user_id not in players:
-        players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
-        }
-    ensure_usd(user_id)
-    ensure_btc(user_id)
+async def buyusd_command(update, context):
+    context.args = ["usd"] + list(context.args)
+    await buy_command(update, context)
 
-    args = context.args
-    if not args:
+async def sellusd_command(update, context):
+    context.args = ["usd"] + list(context.args)
+    await sell_command(update, context)
+
+async def btcrate_command(update, context):
+    context.args = ["btc"]
+    await rate_command(update, context)
+
+async def buybtc_command(update, context):
+    ctx_args = list(context.args)
+    if len(ctx_args) > 1 and ctx_args[1].lower() in ('$', 'usd'):
+        amount_usd = float(ctx_args[0]) if ctx_args else 0
+        coins_equiv = round(amount_usd * coins_rate('usd'))
+        context.args = ["btc", str(coins_equiv)]
+    else:
+        context.args = ["btc"] + ctx_args
+    await buy_command(update, context)
+
+async def sellbtc_command(update, context):
+    context.args = ["btc"] + list(context.args)
+    if len(context.args) > 2 and context.args[2].lower() in ('$', 'usd'):
+        amount_btc = float(context.args[1])
+        usd_gained = round(amount_btc * rates['btc'], 4)
+        user_id = update.effective_user.id
+        ensure_wallet(user_id)
+        if get_bal(user_id, 'btc') < amount_btc:
+            await update.message.reply_text(f"❌ Недостаточно BTC. У тебя: {fmt_amount('btc', get_bal(user_id, 'btc'))}")
+            return
+        add_bal(user_id, 'btc', -amount_btc)
+        add_bal(user_id, 'usd', usd_gained)
         await update.message.reply_text(
-            "Использование:\n`/sellbtc <btc> монеты` — продать за монеты (по умолчанию)\n`/sellbtc <btc> $` — продать за доллары\n"
-            f"Курс: 1 BTC = {btc_rate} $ = {round(btc_rate * usd_rate)} монет",
-            parse_mode='Markdown'
+            f"₿ Продано: {amount_btc} BTC → {usd_gained} $\n\n"
+            f"{fmt_amount('btc', get_bal(user_id, 'btc'))} BTC | {fmt_amount('usd', get_bal(user_id, 'usd'))} $"
         )
+        save_data()
         return
+    await sell_command(update, context)
 
-    currency = parse_currency_arg(args, 1)
-    try:
-        btc_amount = float(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Введи число.")
-        return
-    if btc_amount <= 0:
-        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
-        return
-    if players[user_id]['btc'] < btc_amount:
-        await update.message.reply_text(f"❌ Недостаточно BTC. У тебя: {round(players[user_id]['btc'], 8)} BTC")
-        return
+async def uahrate_command(update, context):
+    context.args = ["uah"]
+    await rate_command(update, context)
 
-    usd_value = btc_amount * btc_rate
-    players[user_id]['btc'] -= btc_amount
+async def buyuah_command(update, context):
+    context.args = ["uah"] + list(context.args)
+    await buy_command(update, context)
 
-    if currency == 'usd':
-        players[user_id]['usd'] += usd_value
-        gained_label = f"{round(usd_value, 4)} $"
-    else:
-        coins_gained = round(usd_value * usd_rate)
-        players[user_id]['balance'] += coins_gained
-        gained_label = f"{coins_gained} монет"
+async def selluah_command(update, context):
+    context.args = ["uah"] + list(context.args)
+    await sell_command(update, context)
 
-    await update.message.reply_text(
-        f"₿ Продано: {btc_amount} BTC по курсу {btc_rate} $\n\n"
-        f"Получено: {gained_label}\n"
-        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['usd'], 4)} $ | {round(players[user_id]['btc'], 8)} BTC"
-    )
-    save_data()
+async def eurrate_command(update, context):
+    context.args = ["eur"]
+    await rate_command(update, context)
 
-# ================= БИРЖА: ГРИВНА (₴) И ЕВРО (€) =================
+async def buyeur_command(update, context):
+    context.args = ["eur"] + list(context.args)
+    await buy_command(update, context)
 
-def ensure_uah(uid):
-    players[uid].setdefault('uah', 0.0)
-
-def ensure_eur(uid):
-    players[uid].setdefault('eur', 0.0)
-
-async def uahrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"₴ **Курс гривны**\n\n1 ₴ = {uah_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
-        parse_mode='Markdown'
-    )
-
-async def eurrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"€ **Курс евро**\n\n1 € = {eur_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
-        parse_mode='Markdown'
-    )
-
-async def buyuah_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in players:
-        players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
-        }
-    ensure_uah(user_id)
-
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(f"Использование: /buyuah <монеты>\nКурс: 1 ₴ = {uah_rate} монет")
-        return
-    coins = int(args[0])
-    if coins <= 0:
-        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
-        return
-    if players[user_id]['balance'] < coins:
-        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
-        return
-
-    uah_bought = round(coins / uah_rate, 2)
-    players[user_id]['balance'] -= coins
-    players[user_id]['uah'] += uah_bought
-    await update.message.reply_text(
-        f"₴ Куплено: {uah_bought} ₴ по курсу {uah_rate}\n\nБаланс: {players[user_id]['balance']} монет | {round(players[user_id]['uah'], 2)} ₴"
-    )
-    save_data()
-
-async def selluah_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in players:
-        players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
-        }
-    ensure_uah(user_id)
-
-    args = context.args
-    if not args:
-        await update.message.reply_text(f"Использование: /selluah <гривны>\nКурс: 1 ₴ = {uah_rate} монет")
-        return
-    try:
-        uah_amount = float(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Введи число.")
-        return
-    if uah_amount <= 0:
-        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
-        return
-    if players[user_id]['uah'] < uah_amount:
-        await update.message.reply_text(f"❌ Недостаточно гривен. У тебя: {round(players[user_id]['uah'], 2)} ₴")
-        return
-
-    coins_gained = round(uah_amount * uah_rate)
-    players[user_id]['uah'] -= uah_amount
-    players[user_id]['balance'] += coins_gained
-    await update.message.reply_text(
-        f"₴ Продано: {uah_amount} ₴ по курсу {uah_rate}\n\nПолучено: {coins_gained} монет\n"
-        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['uah'], 2)} ₴"
-    )
-    save_data()
-
-async def buyeur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in players:
-        players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
-        }
-    ensure_eur(user_id)
-
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(f"Использование: /buyeur <монеты>\nКурс: 1 € = {eur_rate} монет")
-        return
-    coins = int(args[0])
-    if coins <= 0:
-        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
-        return
-    if players[user_id]['balance'] < coins:
-        await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[user_id]['balance']}")
-        return
-
-    eur_bought = round(coins / eur_rate, 2)
-    players[user_id]['balance'] -= coins
-    players[user_id]['eur'] += eur_bought
-    await update.message.reply_text(
-        f"€ Куплено: {eur_bought} € по курсу {eur_rate}\n\nБаланс: {players[user_id]['balance']} монет | {round(players[user_id]['eur'], 2)} €"
-    )
-    save_data()
-
-async def selleur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in players:
-        players[user_id] = {
-            "name": update.effective_user.full_name,
-            "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
-        }
-    ensure_eur(user_id)
-
-    args = context.args
-    if not args:
-        await update.message.reply_text(f"Использование: /selleur <евро>\nКурс: 1 € = {eur_rate} монет")
-        return
-    try:
-        eur_amount = float(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Введи число.")
-        return
-    if eur_amount <= 0:
-        await update.message.reply_text("❌ Сумма должна быть больше нуля.")
-        return
-    if players[user_id]['eur'] < eur_amount:
-        await update.message.reply_text(f"❌ Недостаточно евро. У тебя: {round(players[user_id]['eur'], 2)} €")
-        return
-
-    coins_gained = round(eur_amount * eur_rate)
-    players[user_id]['eur'] -= eur_amount
-    players[user_id]['balance'] += coins_gained
-    await update.message.reply_text(
-        f"€ Продано: {eur_amount} € по курсу {eur_rate}\n\nПолучено: {coins_gained} монет\n"
-        f"Баланс: {players[user_id]['balance']} монет | {round(players[user_id]['eur'], 2)} €"
-    )
-    save_data()
+async def selleur_command(update, context):
+    context.args = ["eur"] + list(context.args)
+    await sell_command(update, context)
 
 # ================= АДМИН-КОМАНДЫ (СКРЫТЫЕ, НЕ В МЕНЮ) =================
 
@@ -2568,6 +2466,32 @@ async def setbalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     save_data()
     await update.message.reply_text(f"✅ Баланс {target_name} установлен: {amount} монет")
 
+async def grantcur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, rest_args = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    if len(rest_args) < 2:
+        await update.message.reply_text(f"Использование: /grantcur <код> <сумма> (или /grantcur @username <код> <сумма>)\nДоступные: {currency_list_str()}")
+        return
+    code = resolve_currency_code(rest_args[0])
+    if not code:
+        await update.message.reply_text(f"❌ Неизвестная валюта. Доступные: {currency_list_str()}")
+        return
+    try:
+        amount = float(rest_args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Введи число.")
+        return
+    add_bal(target_id, code, amount)
+    save_data()
+    info = CURRENCIES[code]
+    await update.message.reply_text(
+        f"✅ {target_name}: {'+' if amount >= 0 else ''}{amount} {info['symbol']} {code.upper()}. "
+        f"Баланс: {fmt_amount(code, get_bal(target_id, code))} {code.upper()}"
+    )
+
 async def forceend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
@@ -2592,10 +2516,10 @@ async def forceend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def resetrates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    global usd_rate, btc_rate, uah_rate, eur_rate
-    usd_rate, btc_rate, uah_rate, eur_rate = USD_START_RATE, BTC_START_RATE, UAH_START_RATE, EUR_START_RATE
+    for code, info in CURRENCIES.items():
+        rates[code] = info["start"]
     save_data()
-    await update.message.reply_text("✅ Курсы валют сброшены к стартовым.")
+    await update.message.reply_text("✅ Курсы всех валют сброшены к стартовым.")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -2644,7 +2568,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 Игроков: {len(real_players)}\n💰 Монет в обороте: {total_coins}\n"
         f"🎮 Активных игр: {active_games}\n💳 Открытых кредитов: {len(credits)}\n"
-        f"💱 Курсы: $ {usd_rate} | ₿ {btc_rate} | ₴ {uah_rate} | € {eur_rate}"
+        f"💱 Курсы: " + " | ".join(f"{CURRENCIES[c]['symbol']}{rates[c]}" for c in CURRENCIES)
     )
 
 # ================= ОБЫЧНЫЕ КОМАНДЫ =================
@@ -2675,21 +2599,14 @@ async def set_commands(app):
         ("stopdice", "⛔ Остановить кости"),
         ("cookies", "🍪 Отравленные печеньки"),
         ("stopcookies", "⛔ Остановить печеньки"),
-        ("pay", "💸 Перевести монеты"),
+        ("pay", "💸 Перевести (любая валюта)"),
         ("credit", "💳 Взять кредит"),
         ("payback", "✅ Погасить кредит"),
-        ("rate", "💵 Курс доллара"),
-        ("buyusd", "📈 Купить доллары"),
-        ("sellusd", "📉 Продать доллары"),
-        ("btcrate", "₿ Курс биткоина"),
-        ("buybtc", "₿ Купить биткоин"),
-        ("sellbtc", "₿ Продать биткоин"),
-        ("uahrate", "₴ Курс гривны"),
-        ("buyuah", "₴ Купить гривны"),
-        ("selluah", "₴ Продать гривны"),
-        ("eurrate", "€ Курс евро"),
-        ("buyeur", "€ Купить евро"),
-        ("selleur", "€ Продать евро"),
+        ("rates", "💱 Курсы всех валют"),
+        ("rate", "💱 Курс одной валюты"),
+        ("buy", "📈 Купить валюту"),
+        ("sell", "📉 Продать валюту"),
+        ("exchange", "🔄 Обменять валюту на валюту"),
         ("top", "🏆 Рейтинг игроков"),
     ]
     await app.bot.set_my_commands(commands)
@@ -2717,11 +2634,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("➕ Добавить в группу", url=f"https://t.me/{me.username}?startgroup=true")])
         text = f"""👋 **Привет, {players[user_id]['name']}!**
 
-Я игровой бот 🎮 Умею играть в УНО с друзьями прямо в группе, вести рейтинг и баланс монет.
+Я игровой бот 🎮 Умею играть с друзьями прямо в группе (карты, кости, ставки и другое), веду рейтинг и баланс монет.
 
 💰 Баланс: {players[user_id]['balance']} монет
 
-Добавь меня в группу с друзьями и запусти /uno — или жми кнопки ниже 👇"""
+Добавь меня в группу с друзьями, а дальше жми кнопки ниже 👇"""
     else:
         text = f"""🎮 **Добро пожаловать, {players[user_id]['name']}!**
 
@@ -2742,14 +2659,14 @@ async def on_bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TY
     if old_status in ('left', 'kicked') and new_status in ('member', 'administrator'):
         chat = result.chat
         keyboard = [
-            [InlineKeyboardButton("🃏 Начать УНО", callback_data="game_uno")],
+            [InlineKeyboardButton("🎮 Меню", callback_data="games_menu")],
             [InlineKeyboardButton("📖 Помощь", callback_data="help")]
         ]
         text = f"""🎮 **Всем привет!** Меня добавили в «{chat.title}»!
 
-Я умею играть в 🃏 **УНО** прямо здесь, вести рейтинг и баланс монет игроков.
+Я игровой бот — умею играть с вами в разные игры на монеты прямо здесь, веду рейтинг и баланс.
 
-Чтобы начать — напишите /uno (или жмите кнопку ниже). Собираем от 2 до 4 игроков!"""
+Жмите "🎮 Меню", чтобы посмотреть все игры, или "📖 Помощь" — там расписаны все команды."""
         await context.bot.send_message(chat.id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2758,15 +2675,17 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ты ещё не зарегистрирован! Напиши /start")
         return
     player = players[user_id]
-    usd_line = f"💵 Доллары: {round(player.get('usd', 0), 4)} $\n" if player.get('usd', 0) else ""
-    btc_line = f"₿ BTC: {round(player.get('btc', 0), 8)}\n" if player.get('btc', 0) else ""
-    uah_line = f"₴ Гривны: {round(player.get('uah', 0), 2)} ₴\n" if player.get('uah', 0) else ""
-    eur_line = f"€ Евро: {round(player.get('eur', 0), 2)} €\n" if player.get('eur', 0) else ""
+    wallet = player.get('wallet', {})
+    wallet_lines = ""
+    for code, amount in wallet.items():
+        if amount and code in CURRENCIES:
+            info = CURRENCIES[code]
+            wallet_lines += f"{info['symbol']} {info['name']}: {fmt_amount(code, amount)} {code.upper()}\n"
     text = f"""👤 **Твой профиль**
 
 📛 Имя: {player['name']}
 💰 Баланс: {player['balance']} монет
-{usd_line}{btc_line}{uah_line}{eur_line}🏆 Побед: {player['wins']}
+{wallet_lines}🏆 Побед: {player['wins']}
 😢 Поражений: {player['losses']}
 
 📊 Игр сыграно: {player['games']['uno']}"""
@@ -2873,27 +2792,16 @@ HELP_TEXT = f"""📖 **Помощь**
 
 ━━━━━━━━━━━━━━━
 
-💵 **Доллар ($) — биржа**
-• `/rate` — текущий курс (стартует с {USD_START_RATE} монет за $, дальше меняется случайно каждые {USD_UPDATE_SECONDS // 60} минуты)
-• `/buyusd <монеты>` — купить доллары за монеты по текущему курсу
-• `/sellusd <доллары>` — продать доллары обратно в монеты по текущему курсу
-• Курс скачет случайно ±{int(USD_MAX_CHANGE * 100)}% каждые {USD_UPDATE_SECONDS // 60} минуты — можно ловить моменты подешевле/подороже
-
-━━━━━━━━━━━━━━━
-
-₿ **Биткоин (BTC) — биржа**
-• `/btcrate` — текущий курс (стартует с {BTC_START_RATE} $ за 1 BTC, тоже случайно меняется каждые {USD_UPDATE_SECONDS // 60} минуты)
-• `/buybtc <монеты>` — купить BTC за монеты
-• `/buybtc <сумма> $` — купить BTC за доллары
-• `/sellbtc <btc>` — продать BTC за монеты
-• `/sellbtc <btc> $` — продать BTC за доллары
-
-━━━━━━━━━━━━━━━
-
-₴ **Гривна и € Евро — биржа**
-• `/uahrate`, `/buyuah <монеты>`, `/selluah <гривны>`
-• `/eurrate`, `/buyeur <монеты>`, `/selleur <евро>`
-• Курсы тоже меняются случайно каждые {USD_UPDATE_SECONDS // 60} минуты
+💱 **Биржа валют** (9 валют: $, €, ₴, ₽, ¥, ₣, KD, ₩, ₿)
+• `/rates` — курсы сразу всех валют
+• `/rate <код>` — курс одной валюты (например `/rate eur`), без кода — покажет $
+• `/buy <код> <монеты>` — купить валюту за монеты (например `/buy jpy 1000`)
+• `/sell <код> <количество>` — продать валюту обратно в монеты
+• `/exchange <из> <в> <количество>` — обменять одну валюту на другую напрямую (например `/exchange usd eur 50`)
+• Курсы у каждой валюты свои и меняются случайно каждые {USD_UPDATE_SECONDS // 60} минуты
+• BTC оценён в долларах (как в жизни) — его цена в монетах зависит и от курса BTC/$, и от курса $/монеты одновременно
+• Старые команды `/buyusd`, `/sellusd`, `/btcrate`, `/buybtc`, `/sellbtc`, `/uahrate`, `/buyuah`, `/selluah`, `/eurrate`, `/buyeur`, `/selleur` тоже работают — это просто быстрые ярлыки для той же биржи
+• `/pay` тоже понимает любую валюту, не только монеты и доллары — см. выше
 
 ━━━━━━━━━━━━━━━
 
@@ -3129,7 +3037,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app):
     await set_commands(app)
-    asyncio.create_task(usd_rate_loop())
+    asyncio.create_task(rates_loop())
     asyncio.create_task(autosave_loop())
 
 def main():
@@ -3171,9 +3079,14 @@ def main():
     app.add_handler(CommandHandler("eurrate", eurrate_command))
     app.add_handler(CommandHandler("buyeur", buyeur_command))
     app.add_handler(CommandHandler("selleur", selleur_command))
+    app.add_handler(CommandHandler("rates", rates_command))
+    app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("sell", sell_command))
+    app.add_handler(CommandHandler("exchange", exchange_command))
 
     # --- скрытые админ-команды, намеренно НЕ в set_commands() ---
     app.add_handler(CommandHandler("grant", grant_command))
+    app.add_handler(CommandHandler("grantcur", grantcur_command))
     app.add_handler(CommandHandler("setbalance", setbalance_command))
     app.add_handler(CommandHandler("forceend", forceend_command))
     app.add_handler(CommandHandler("resetrates", resetrates_command))
