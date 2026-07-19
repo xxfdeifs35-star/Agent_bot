@@ -1923,7 +1923,11 @@ async def collect_debt(user_id, chat_id, bot):
         await bot.send_message(user_id, text, parse_mode='Markdown')
     except Exception:
         pass
-        
+
+async def schedule_collection(user_id, chat_id, bot):
+    await asyncio.sleep(CREDIT_MINUTES * 60)
+    await collect_debt(user_id, chat_id, bot)
+    
 async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -1983,10 +1987,6 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     save_data()
     
-    async def schedule_collection(user_id, chat_id, bot):
-    await asyncio.sleep(CREDIT_MINUTES * 60)
-    await collect_debt(user_id, chat_id, bot)
-
 async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -2447,6 +2447,7 @@ HELP_TEXT = f"""📖 **Помощь**
 
 ━━━━━━━━━━━━━━━
 
+
 💰 Баланс, победы и поражения одни на все игры и не привязаны к конкретной группе — рейтинг `/top` глобальный.
 📌 Пока лобби/игра активны, их сообщение закреплено в чате — открепляется автоматически после окончания. Для этого у бота должны быть права на закрепление сообщений в группе.
 🤖 В лобби УНО, Русской рулетки и Костей есть кнопка "Играть с ботом" — можно добить лобби ботами вместо живых игроков, они ходят автоматически."""
@@ -2591,6 +2592,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text("🎮 **Выбери игру:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
+    elif data == "game_dice_info":
+        text = """🎲 **Кости**
+
+От 2 до 6 игроков, каждый ставит одну и ту же сумму. По очереди выбираете свободное число от 1 до 6. Когда все выбрали — бот кидает кубик: чей номер выпал, тот забирает весь банк. Если номер никто не занял — ставки возвращаются всем.
+
+Использование: `/dice <ставка>`
+Например: `/dice 100`"""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
     elif data == "game_coin_info":
         text = """🪙 **Орёл или Решка**
 
@@ -2621,16 +2632,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    elif data == "game_dice_info":
-        text = """🎲 **Кости**
-
-От 2 до 6 игроков, каждый ставит одну и ту же сумму. По очереди выбираете свободное число от 1 до 6. Когда все выбрали — бот кидает кубик: у кого выпавший номер, тот забирает весь банк. Если выпавший номер никто не занял — весь банк сгорает.
-
-Использование: `/dice <ставка>`
-Например: `/dice 100`"""
-        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
     elif data == "pay_info":
         text = f"""💸 **Перевод монет**
 
@@ -2639,7 +2640,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Например: `/pay 500`
 
-⚠️ Лимит: не больше {PAY_LIMIT} монет за один перевод."""
+⚠️ Лимит: не больше {PAY_LIMIT} монет за один перевод (переводов можно делать сколько угодно)."""
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -2648,13 +2649,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Ты ещё не зарегистрирован!", parse_mode='Markdown')
             return
         player = players[user_id]
-        usd_line = f"💵 Доллары: {round(player.get('usd', 0), 4)} $\n" if player.get('usd', 0) else ""
-        btc_line = f"₿ BTC: {round(player.get('btc', 0), 8)}\n" if player.get('btc', 0) else ""
         text = f"""👤 **Твой профиль**
 
 📛 Имя: {player['name']}
 💰 Баланс: {player['balance']} монет
-{usd_line}{btc_line}🏆 Побед: {player['wins']}
+🏆 Побед: {player['wins']}
 😢 Поражений: {player['losses']}
 
 📊 Игр сыграно: {player['games']['uno']}"""
@@ -2674,14 +2673,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         await query.edit_message_text(HELP_TEXT, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-
 # ================= ГЛАВНАЯ ФУНКЦИЯ =================
 
 async def post_init(app):
     await set_commands(app)
     asyncio.create_task(usd_rate_loop())
+    asyncio.create_task(autosave_loop())
 
 def main():
+    load_data()
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(MessageHandler(filters.ALL, touch_username), group=-1)
@@ -2726,3 +2726,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
