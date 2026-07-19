@@ -1926,15 +1926,9 @@ async def collect_debt(user_id, chat_id, bot):
     if user_id not in players:
         return
 
-    # Списываем долг с игрока
     players[user_id]['balance'] -= amount
     balance = players[user_id]['balance']
     name = players[user_id]['name']
-
-    # Банкир получает 100% от суммы кредита при возврате (бонус за возврат)
-    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-    if banker_uid and banker_uid != user_id and banker_uid in players:
-        players[banker_uid]['balance'] += amount
 
     text = f"🕴️ **К {name} пришли коллекторы!**\n\nЗа неоплаченный кредит забрали {amount} монет."
     if balance < 0:
@@ -2004,7 +1998,6 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
     save_data()
-    
 async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -2019,18 +2012,25 @@ async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Списываем долг с игрока
     players[user_id]['balance'] -= amount
-
-    # Банкир получает 100% от суммы кредита при досрочном возврате
-    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-    if banker_uid and banker_uid != user_id and banker_uid in players:
-        players[banker_uid]['balance'] += amount
-
     del credits[user_id]
     await update.message.reply_text(f"✅ Кредит на {amount} монет погашен досрочно!\nБаланс: {players[user_id]['balance']} монет")
     save_data()
-    
+
+# ================= БИРЖА: ДОЛЛАР ($) =================
+
+def ensure_usd(uid):
+    players[uid].setdefault('usd', 0.0)
+
+async def usd_rate_loop():
+    global usd_rate, btc_rate
+    while True:
+        await asyncio.sleep(USD_UPDATE_SECONDS)
+        change = random.uniform(-USD_MAX_CHANGE, USD_MAX_CHANGE)
+        usd_rate = round(max(1.0, usd_rate * (1 + change)), 2)
+        btc_change = random.uniform(-BTC_MAX_CHANGE, BTC_MAX_CHANGE)
+        btc_rate = round(max(100.0, btc_rate * (1 + btc_change)), 2)
+
 async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"💵 **Курс доллара**\n\n1 $ = {usd_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
