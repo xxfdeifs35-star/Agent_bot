@@ -32,10 +32,9 @@ MAX_ROULETTE = 6
 MIN_ROULETTE = 2
 COOKIES_TOTAL = 30
 PAY_LIMIT = 45000
-PAY_WINDOW = 24 * 60
 CREDIT_MAX = 300000
 BANKER_USERNAME = "SANS_ZM"
-CREDIT_COMMISSION = 0.05
+CREDIT_COMMISSION = 0.15
 CREDIT_MINUTES = 30
 USD_START_RATE = 44.0
 USD_UPDATE_SECONDS = 120
@@ -1507,12 +1506,6 @@ async def stop_dice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= ПЕРЕВОД МОНЕТ =================
 
-def sent_last_24h(uid):
-    now = time.time()
-    log = players[uid].setdefault('transfer_log', [])
-    log[:] = [(ts, amt) for ts, amt in log if now - ts < PAY_WINDOW]
-    return sum(amt for _, amt in log)
-
 async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
 
@@ -1586,18 +1579,12 @@ async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Недостаточно монет. Баланс: {players[sender_id]['balance']}")
             return
 
-        already_sent = sent_last_24h(sender_id)
-        if already_sent + amount > PAY_LIMIT:
-            remaining = PAY_LIMIT - already_sent
-            await update.message.reply_text(
-                f"❌ Превышен лимит переводов: {PAY_LIMIT} монет за 24 минуты.\n"
-                f"Уже отправлено за последние 24 мин: {already_sent}\nОсталось доступно: {max(remaining, 0)}"
-            )
+        if amount > PAY_LIMIT:
+            await update.message.reply_text(f"❌ Максимум за один перевод: {PAY_LIMIT} монет.")
             return
 
         players[sender_id]['balance'] -= amount
         players[target_user.id]['balance'] += amount
-        players[sender_id].setdefault('transfer_log', []).append((time.time(), amount))
 
         await update.message.reply_text(
             f"💸 {players[sender_id]['name']} перевёл {amount} монет игроку {players[target_user.id]['name']}!"
@@ -1936,10 +1923,7 @@ async def collect_debt(user_id, chat_id, bot):
         await bot.send_message(user_id, text, parse_mode='Markdown')
     except Exception:
         pass
-    save_data()
-    await asyncio.sleep(CREDIT_MINUTES * 60)
-    await collect_debt(user_id, chat_id, bot)
-
+        
 async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -1999,6 +1983,10 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     save_data()
     
+    async def schedule_collection(user_id, chat_id, bot):
+    await asyncio.sleep(CREDIT_MINUTES * 60)
+    await collect_debt(user_id, chat_id, bot)
+
 async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -2429,7 +2417,7 @@ HELP_TEXT = f"""📖 **Помощь**
 💸 **Перевод**
 • Ответь на сообщение игрока командой `/pay <сумма>` — монеты
 • Или `/pay <сумма> $` — доллары
-• Лимит: не больше {PAY_LIMIT} монет за 24 минуты одному отправителю (только для монет)
+• Лимит: не больше {PAY_LIMIT} монет за один перевод (можно переводить сколько угодно раз подряд)
 
 ━━━━━━━━━━━━━━━
 
@@ -2460,7 +2448,8 @@ HELP_TEXT = f"""📖 **Помощь**
 ━━━━━━━━━━━━━━━
 
 💰 Баланс, победы и поражения одни на все игры и не привязаны к конкретной группе — рейтинг `/top` глобальный.
-📌 Пока лобби/игра активны, их сообщение закреплено в чате — открепляется автоматически после окончания. Для этого у бота должны быть права на закрепление сообщений в группе."""
+📌 Пока лобби/игра активны, их сообщение закреплено в чате — открепляется автоматически после окончания. Для этого у бота должны быть права на закрепление сообщений в группе.
+🤖 В лобби УНО, Русской рулетки и Костей есть кнопка "Играть с ботом" — можно добить лобби ботами вместо живых игроков, они ходят автоматически."""
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
@@ -2550,4 +2539,190 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if user_id not in players:
             players[user_id] = {
-                "name": update.effective_user.full
+                "name": update.effective_user.full_name,
+                "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            }
+        state = {
+            "players": [user_id], "hands": {}, "deck": [], "discard": [],
+            "turn_idx": 0, "direction": 1, "current_color": None,
+            "status": "waiting", "host": user_id, "chat_id": chat_id,
+            "message_id": None, "dm_msg": {}, "awaiting_color": None, "bet": 0,
+        }
+        games_uno[chat_id] = state
+        await query.answer()
+        await query.edit_message_text(lobby_text(state), reply_markup=lobby_keyboard(state), parse_mode='Markdown')
+        state['message_id'] = query.message.message_id
+        await pin_game_message(context.bot, chat_id, state['message_id'])
+        return
+
+    if context.user_data.get('menu_owner') and context.user_data['menu_owner'] != user_id:
+        if message_owners.get(query.message.message_id) and message_owners[query.message.message_id] != user_id:
+            await query.answer("❌ Это не твоё меню!", show_alert=True)
+            return
+
+    await query.answer()
+
+    if data == "menu":
+        keyboard = [
+            [InlineKeyboardButton("🎮 Игры", callback_data="games_menu")],
+            [InlineKeyboardButton("👤 Профиль", callback_data="profile")],
+            [InlineKeyboardButton("💸 Перевести монеты", callback_data="pay_info")],
+            [InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
+            [InlineKeyboardButton("📖 Помощь", callback_data="help")]
+        ]
+        if user_id in players:
+            text = f"""🎮 **Главное меню**
+
+💰 Баланс: {players[user_id]['balance']} монет
+🏆 Побед: {players[user_id]['wins']}
+😢 Поражений: {players[user_id]['losses']}"""
+        else:
+            text = "🎮 **Главное меню**"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "games_menu":
+        keyboard = [
+            [InlineKeyboardButton("🃏 УНО", callback_data="game_uno")],
+            [InlineKeyboardButton("🪙 Монетка", callback_data="game_coin_info")],
+            [InlineKeyboardButton("🔫 Русская рулетка", callback_data="game_roulette_info")],
+            [InlineKeyboardButton("🍪 Печеньки", callback_data="game_cookies_info")],
+            [InlineKeyboardButton("🎲 Кости", callback_data="game_dice_info")],
+            [InlineKeyboardButton("🏠 Назад", callback_data="menu")]
+        ]
+        await query.edit_message_text("🎮 **Выбери игру:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "game_coin_info":
+        text = """🪙 **Орёл или Решка**
+
+Дуэль на двоих — ставите одинаковую сумму, хост выбирает орла или решку, соперник автоматически получает другую сторону. Бот подкидывает монетку, победитель забирает всё.
+
+Использование: `/coin <ставка>`
+Например: `/coin 100`"""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "game_roulette_info":
+        text = """🔫 **Русская рулетка**
+
+От 2 до 6 игроков, каждый ставит одну и ту же сумму. По кругу нажимаете "Выстрелить" (1 шанс из 6 выбыть). Игра идёт раундами, пока не останется один — он забирает весь банк.
+
+Использование: `/roulette <ставка>`
+Например: `/roulette 50`"""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "game_cookies_info":
+        text = """🍪 **Отравленные печеньки**
+
+Дуэль на двоих, 30 печенек на столе. Каждый тайно травит одну печеньку в личке боту, потом едите по очереди — кто съест отравленную (свою или чужую), тот проигрывает.
+
+Использование: `/cookies <ставка>`
+Например: `/cookies 100`"""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "game_dice_info":
+        text = """🎲 **Кости**
+
+От 2 до 6 игроков, каждый ставит одну и ту же сумму. По очереди выбираете свободное число от 1 до 6. Когда все выбрали — бот кидает кубик: у кого выпавший номер, тот забирает весь банк. Если выпавший номер никто не занял — весь банк сгорает.
+
+Использование: `/dice <ставка>`
+Например: `/dice 100`"""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "pay_info":
+        text = f"""💸 **Перевод монет**
+
+Ответь на сообщение игрока в группе командой:
+`/pay <сумма>`
+
+Например: `/pay 500`
+
+⚠️ Лимит: не больше {PAY_LIMIT} монет за один перевод."""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "profile":
+        if user_id not in players:
+            await query.edit_message_text("❌ Ты ещё не зарегистрирован!", parse_mode='Markdown')
+            return
+        player = players[user_id]
+        usd_line = f"💵 Доллары: {round(player.get('usd', 0), 4)} $\n" if player.get('usd', 0) else ""
+        btc_line = f"₿ BTC: {round(player.get('btc', 0), 8)}\n" if player.get('btc', 0) else ""
+        text = f"""👤 **Твой профиль**
+
+📛 Имя: {player['name']}
+💰 Баланс: {player['balance']} монет
+{usd_line}{btc_line}🏆 Побед: {player['wins']}
+😢 Поражений: {player['losses']}
+
+📊 Игр сыграно: {player['games']['uno']}"""
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "top":
+        sorted_players = sorted(players.items(), key=lambda x: x[1]['balance'], reverse=True)
+        text = "🏆 **ТОП ИГРОКОВ**\n\n"
+        for i, (uid, pdata) in enumerate(sorted_players[:10], 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            text += f"{medal} {pdata['name']} — {pdata['balance']} монет\n"
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "help":
+        keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
+        await query.edit_message_text(HELP_TEXT, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+
+# ================= ГЛАВНАЯ ФУНКЦИЯ =================
+
+async def post_init(app):
+    await set_commands(app)
+    asyncio.create_task(usd_rate_loop())
+
+def main():
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+
+    app.add_handler(MessageHandler(filters.ALL, touch_username), group=-1)
+    app.add_handler(CallbackQueryHandler(touch_username), group=-1)
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("games", games))
+    app.add_handler(CommandHandler("uno", uno_command))
+    app.add_handler(CommandHandler("stopuno", stop_uno_command))
+    app.add_handler(CommandHandler("coin", coin_command))
+    app.add_handler(CommandHandler("stopcoin", stop_coin_command))
+    app.add_handler(CommandHandler("roulette", roulette_command))
+    app.add_handler(CommandHandler("stoproulette", stop_roulette_command))
+    app.add_handler(CommandHandler("dice", dice_command))
+    app.add_handler(CommandHandler("stopdice", stop_dice_command))
+    app.add_handler(CommandHandler("pay", pay_command))
+    app.add_handler(CommandHandler("credit", credit_command))
+    app.add_handler(CommandHandler("payback", payback_command))
+    app.add_handler(CommandHandler("rate", rate_command))
+    app.add_handler(CommandHandler("buyusd", buyusd_command))
+    app.add_handler(CommandHandler("sellusd", sellusd_command))
+    app.add_handler(CommandHandler("btcrate", btcrate_command))
+    app.add_handler(CommandHandler("buybtc", buybtc_command))
+    app.add_handler(CommandHandler("sellbtc", sellbtc_command))
+    app.add_handler(CommandHandler("cookies", cookies_command))
+    app.add_handler(CommandHandler("stopcookies", stop_cookies_command))
+
+    app.add_handler(ChatMemberHandler(on_bot_added_to_group, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    app.add_handler(CallbackQueryHandler(uno_callback_handler, pattern="^uno_"))
+    app.add_handler(CallbackQueryHandler(coin_callback_handler, pattern="^coin_"))
+    app.add_handler(CallbackQueryHandler(roulette_callback_handler, pattern="^roul_"))
+    app.add_handler(CallbackQueryHandler(dice_callback_handler, pattern="^dice_"))
+    app.add_handler(CallbackQueryHandler(cookies_callback_handler, pattern="^cook_"))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+
+    print("🎮 Бот Agent Bot запущен!")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
