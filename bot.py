@@ -473,9 +473,20 @@ async def finish_game(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE):
         pot = state['bet'] * len(state['players'])
         players[winner_uid]['balance'] += pot
         prize_text = f"💰 Забрал банк: {pot} монет"
+        
+        # Банкир получает 100% от банка сверху
+        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+        if banker_uid and banker_uid in players:
+            players[banker_uid]['balance'] += pot
     else:
         players[winner_uid]['balance'] += 100
         prize_text = "💰 Получил: 100 монет"
+        
+        # Банкир получает 100 монет сверху
+        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+        if banker_uid and banker_uid in players:
+            players[banker_uid]['balance'] += 100
+    
     for uid in state['players']:
         players[uid]['games']['uno'] += 1
         if uid != winner_uid:
@@ -845,6 +856,9 @@ async def coin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         players[winner_uid]['wins'] += 1
         loser_uid = user_id if winner_uid == state['host'] else state['host']
         players[loser_uid]['losses'] += 1
+banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+if banker_uid and banker_uid in players:
+    players[banker_uid]['balance'] += state['bet'] * 2
 
         await query.edit_message_text(coin_text(state, (winner_uid, side)), parse_mode='Markdown')
         await unpin_game_message(context.bot, chat_id, state['message_id'])
@@ -980,15 +994,22 @@ async def start_roulette_game(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
 async def finish_roulette(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE):
     state = games_roulette[chat_id]
-    players[winner_uid]['balance'] += state['pot']
+    pot = state['pot']
+    players[winner_uid]['balance'] += pot
     players[winner_uid]['wins'] += 1
+    
+    # Банкир получает 100% от банка сверху
+    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+    if banker_uid and banker_uid in players:
+        players[banker_uid]['balance'] += pot
+    
     for uid in state['players']:
         if uid != winner_uid:
             players[uid]['losses'] += 1
     try:
         await context.bot.edit_message_text(
             chat_id=chat_id, message_id=state['message_id'],
-            text=f"🏆 **Игра окончена!**\n\nВыжил и забрал банк ({state['pot']} монет): {players[winner_uid]['name']} 🎉",
+            text=f"🏆 **Игра окончена!**\n\nВыжил и забрал банк ({pot} монет): {players[winner_uid]['name']} 🎉",
             parse_mode='Markdown'
         )
     except Exception:
@@ -1304,12 +1325,22 @@ async def finish_dice(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if winner_uid:
         players[winner_uid]['balance'] += pot
         players[winner_uid]['wins'] += 1
+        
+        # Банкир получает 100% от банка сверху
+        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+        if banker_uid and banker_uid in players:
+            players[banker_uid]['balance'] += pot
+        
         for uid in state['players']:
             if uid != winner_uid:
                 players[uid]['losses'] += 1
         text = f"🎲 **Выпало: {roll}!**\n\n🏆 Угадал и забрал банк ({pot} монет): {players[winner_uid]['name']} 🎉"
     else:
-        text = f"🎲 **Выпало: {roll}!**\n\nНикто не угадал это число — весь банк ({pot} монет) сгорает."
+        # Никто не угадал — банк сгорает, но банкир всё равно получает 100% от банка
+        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+        if banker_uid and banker_uid in players:
+            players[banker_uid]['balance'] += pot
+        text = f"🎲 **Выпало: {roll}!**\n\nНикто не угадал это число — банк ({pot} монет) сгорает."
 
     try:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=state['message_id'], text=text, parse_mode='Markdown')
@@ -1720,8 +1751,15 @@ async def finish_cookies(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE
         text = f"🍪 **Ничья!** {reason}\nСтавки возвращены."
     else:
         loser_uid = state['opponent'] if winner_uid == state['host'] else state['host']
-        players[winner_uid]['balance'] += state['bet'] * 2
+        pot = state['bet'] * 2
+        players[winner_uid]['balance'] += pot
         players[winner_uid]['wins'] += 1
+        
+        # Банкир получает 100% от банка сверху
+        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+        if banker_uid and banker_uid in players:
+            players[banker_uid]['balance'] += pot
+        
         players[loser_uid]['losses'] += 1
         text = f"🍪 **{reason}**\n\n🏆 Победитель: {players[winner_uid]['name']} (+{state['bet']} монет)"
     try:
@@ -1926,9 +1964,15 @@ async def collect_debt(user_id, chat_id, bot):
     if user_id not in players:
         return
 
+    # Списываем долг с игрока
     players[user_id]['balance'] -= amount
     balance = players[user_id]['balance']
     name = players[user_id]['name']
+
+    # Банкир получает 100% от суммы кредита при возврате (бонус за возврат)
+    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+    if banker_uid and banker_uid != user_id and banker_uid in players:
+        players[banker_uid]['balance'] += amount
 
     text = f"🕴️ **К {name} пришли коллекторы!**\n\nЗа неоплаченный кредит забрали {amount} монет."
     if balance < 0:
@@ -1980,7 +2024,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Игрок получает 100% суммы
     players[user_id]['balance'] += amount
 
-    # Банкир получает 100% от суммы сверху (бонус)
+    # Банкир получает 100% от суммы сверху (бонус при выдаче)
     banker_uid = username_to_id.get(BANKER_USERNAME.lower())
     if banker_uid and banker_uid != user_id and banker_uid in players:
         players[banker_uid]['balance'] += amount
@@ -1989,17 +2033,16 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     credits[user_id] = {"amount": amount, "taken_at": time.time(), "chat_id": chat_id}
     asyncio.create_task(schedule_collection(user_id, chat_id, context.bot))
 
-    # Сообщение БЕЗ упоминаний о комиссии
     await update.message.reply_text(
         f"💳 **Кредит выдан: {amount} монет**\n\n"
         f"На баланс зачислено: {amount} монет\n\n"
         f"Баланс: {players[user_id]['balance']} монет\n\n"
-        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и выебут тебя та заберут {amount} монет автоматически.\n"
+        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и спишут {amount} монет автоматически.\n"
         f"Погасить раньше: /payback",
         parse_mode='Markdown'
     )
     save_data()
-
+    
 async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -2014,25 +2057,18 @@ async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Списываем долг с игрока
     players[user_id]['balance'] -= amount
+
+    # Банкир получает 100% от суммы кредита при досрочном возврате
+    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
+    if banker_uid and banker_uid != user_id and banker_uid in players:
+        players[banker_uid]['balance'] += amount
+
     del credits[user_id]
     await update.message.reply_text(f"✅ Кредит на {amount} монет погашен досрочно!\nБаланс: {players[user_id]['balance']} монет")
     save_data()
-
-# ================= БИРЖА: ДОЛЛАР ($) =================
-
-def ensure_usd(uid):
-    players[uid].setdefault('usd', 0.0)
-
-async def usd_rate_loop():
-    global usd_rate, btc_rate
-    while True:
-        await asyncio.sleep(USD_UPDATE_SECONDS)
-        change = random.uniform(-USD_MAX_CHANGE, USD_MAX_CHANGE)
-        usd_rate = round(max(1.0, usd_rate * (1 + change)), 2)
-        btc_change = random.uniform(-BTC_MAX_CHANGE, BTC_MAX_CHANGE)
-        btc_rate = round(max(100.0, btc_rate * (1 + btc_change)), 2)
-
+    
 async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"💵 **Курс доллара**\n\n1 $ = {usd_rate} монет\n\nОбновляется каждые {USD_UPDATE_SECONDS // 60} минуты случайным образом.",
@@ -2413,6 +2449,7 @@ HELP_TEXT = f"""📖 **Помощь**
 • Каждый тайно травит одну печеньку (1-30) в личке боту — по очереди, начинает создавший вызов
 • После этого едите печеньки по очереди — кто съест отравленную (свою или чужую), тот проигрывает и теряет ставку
 • `/stopcookies` — принудительно остановить, ставки вернутся всем
+
 ━━━━━━━━━━━━━━━
 
 🎲 **Кости**
@@ -2741,4 +2778,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
