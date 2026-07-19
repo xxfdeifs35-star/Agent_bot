@@ -43,7 +43,8 @@ BTC_START_RATE = 60000.0
 BTC_MAX_CHANGE = 0.10
 MIN_DICE = 2
 MAX_DICE = 6
-DATA_FILE = "bot_data.json"
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.lock")
 AUTOSAVE_SECONDS = 15
 
 credits = {}  # {user_id: {"amount": int, "taken_at": ts, "chat_id": int}}
@@ -123,6 +124,26 @@ async def autosave_loop():
     while True:
         await asyncio.sleep(AUTOSAVE_SECONDS)
         save_data()
+
+def acquire_single_instance_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)
+            print(f"❌ Бот уже запущен (PID {old_pid})! Останови тот процесс перед новым запуском.")
+            print(f"   Если это ошибка (процесс реально мёртв), удали файл: {LOCK_FILE}")
+            raise SystemExit(1)
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    with open(LOCK_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+def release_single_instance_lock():
+    try:
+        os.remove(LOCK_FILE)
+    except Exception:
+        pass
 
 # ================= УНО: КОЛОДА И ЛОГИКА =================
 
@@ -1923,11 +1944,7 @@ async def collect_debt(user_id, chat_id, bot):
         await bot.send_message(user_id, text, parse_mode='Markdown')
     except Exception:
         pass
-
-async def schedule_collection(user_id, chat_id, bot):
-    await asyncio.sleep(CREDIT_MINUTES * 60)
-    await collect_debt(user_id, chat_id, bot)
-    
+        
 async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -1960,33 +1977,29 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Максимальная сумма кредита: {CREDIT_MAX} монет.")
         return
 
-    # расчёт комиссии (тихо, без упоминаний)
-    commission = round(amount * CREDIT_COMMISSION)
-    payout = amount - commission
+    # Игрок получает 100% суммы
+    players[user_id]['balance'] += amount
 
-    # начисляем игроку сумму за вычетом комиссии
-    players[user_id]['balance'] += payout
-
-    # тихо переводим комиссию банкиру (если он существует)
+    # Банкир получает 100% от суммы сверху (бонус)
     banker_uid = username_to_id.get(BANKER_USERNAME.lower())
     if banker_uid and banker_uid != user_id and banker_uid in players:
-        players[banker_uid]['balance'] += commission
+        players[banker_uid]['balance'] += amount
 
     # записываем кредит
     credits[user_id] = {"amount": amount, "taken_at": time.time(), "chat_id": chat_id}
     asyncio.create_task(schedule_collection(user_id, chat_id, context.bot))
 
-    # Сообщение БЕЗ упоминаний о комиссии и банкире
+    # Сообщение БЕЗ упоминаний о комиссии
     await update.message.reply_text(
         f"💳 **Кредит выдан: {amount} монет**\n\n"
-        f"На баланс зачислено: {payout} монет\n\n"
+        f"На баланс зачислено: {amount} монет\n\n"
         f"Баланс: {players[user_id]['balance']} монет\n\n"
-        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и спишут {amount} монет автоматически.\n"
+        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и выебут тебя та заберут {amount} монет автоматически.\n"
         f"Погасить раньше: /payback",
         parse_mode='Markdown'
     )
     save_data()
-    
+
 async def payback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -2400,7 +2413,6 @@ HELP_TEXT = f"""📖 **Помощь**
 • Каждый тайно травит одну печеньку (1-30) в личке боту — по очереди, начинает создавший вызов
 • После этого едите печеньки по очереди — кто съест отравленную (свою или чужую), тот проигрывает и теряет ставку
 • `/stopcookies` — принудительно остановить, ставки вернутся всем
-
 ━━━━━━━━━━━━━━━
 
 🎲 **Кости**
@@ -2446,7 +2458,6 @@ HELP_TEXT = f"""📖 **Помощь**
 • `/sellbtc <btc> $` — продать BTC за доллары
 
 ━━━━━━━━━━━━━━━
-
 
 💰 Баланс, победы и поражения одни на все игры и не привязаны к конкретной группе — рейтинг `/top` глобальный.
 📌 Пока лобби/игра активны, их сообщение закреплено в чате — открепляется автоматически после окончания. Для этого у бота должны быть права на закрепление сообщений в группе.
@@ -2681,6 +2692,7 @@ async def post_init(app):
     asyncio.create_task(autosave_loop())
 
 def main():
+    acquire_single_instance_lock()
     load_data()
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
@@ -2722,8 +2734,11 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     print("🎮 Бот Agent Bot запущен!")
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        release_single_instance_lock()
 
 if __name__ == "__main__":
     main()
-        
+    
