@@ -473,20 +473,9 @@ async def finish_game(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE):
         pot = state['bet'] * len(state['players'])
         players[winner_uid]['balance'] += pot
         prize_text = f"💰 Забрал банк: {pot} монет"
-        
-        # Банкир получает 100% от банка сверху
-        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-        if banker_uid and banker_uid in players:
-            players[banker_uid]['balance'] += pot
     else:
         players[winner_uid]['balance'] += 100
         prize_text = "💰 Получил: 100 монет"
-        
-        # Банкир получает 100 монет сверху
-        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-        if banker_uid and banker_uid in players:
-            players[banker_uid]['balance'] += 100
-    
     for uid in state['players']:
         players[uid]['games']['uno'] += 1
         if uid != winner_uid:
@@ -856,9 +845,6 @@ async def coin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         players[winner_uid]['wins'] += 1
         loser_uid = user_id if winner_uid == state['host'] else state['host']
         players[loser_uid]['losses'] += 1
-banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-if banker_uid and banker_uid in players:
-    players[banker_uid]['balance'] += state['bet'] * 2
 
         await query.edit_message_text(coin_text(state, (winner_uid, side)), parse_mode='Markdown')
         await unpin_game_message(context.bot, chat_id, state['message_id'])
@@ -994,22 +980,15 @@ async def start_roulette_game(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
 async def finish_roulette(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE):
     state = games_roulette[chat_id]
-    pot = state['pot']
-    players[winner_uid]['balance'] += pot
+    players[winner_uid]['balance'] += state['pot']
     players[winner_uid]['wins'] += 1
-    
-    # Банкир получает 100% от банка сверху
-    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-    if banker_uid and banker_uid in players:
-        players[banker_uid]['balance'] += pot
-    
     for uid in state['players']:
         if uid != winner_uid:
             players[uid]['losses'] += 1
     try:
         await context.bot.edit_message_text(
             chat_id=chat_id, message_id=state['message_id'],
-            text=f"🏆 **Игра окончена!**\n\nВыжил и забрал банк ({pot} монет): {players[winner_uid]['name']} 🎉",
+            text=f"🏆 **Игра окончена!**\n\nВыжил и забрал банк ({state['pot']} монет): {players[winner_uid]['name']} 🎉",
             parse_mode='Markdown'
         )
     except Exception:
@@ -1325,22 +1304,12 @@ async def finish_dice(chat_id, context: ContextTypes.DEFAULT_TYPE):
     if winner_uid:
         players[winner_uid]['balance'] += pot
         players[winner_uid]['wins'] += 1
-        
-        # Банкир получает 100% от банка сверху
-        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-        if banker_uid and banker_uid in players:
-            players[banker_uid]['balance'] += pot
-        
         for uid in state['players']:
             if uid != winner_uid:
                 players[uid]['losses'] += 1
         text = f"🎲 **Выпало: {roll}!**\n\n🏆 Угадал и забрал банк ({pot} монет): {players[winner_uid]['name']} 🎉"
     else:
-        # Никто не угадал — банк сгорает, но банкир всё равно получает 100% от банка
-        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-        if banker_uid and banker_uid in players:
-            players[banker_uid]['balance'] += pot
-        text = f"🎲 **Выпало: {roll}!**\n\nНикто не угадал это число — банк ({pot} монет) сгорает."
+        text = f"🎲 **Выпало: {roll}!**\n\nНикто не угадал это число — весь банк ({pot} монет) сгорает."
 
     try:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=state['message_id'], text=text, parse_mode='Markdown')
@@ -1751,15 +1720,8 @@ async def finish_cookies(chat_id, winner_uid, context: ContextTypes.DEFAULT_TYPE
         text = f"🍪 **Ничья!** {reason}\nСтавки возвращены."
     else:
         loser_uid = state['opponent'] if winner_uid == state['host'] else state['host']
-        pot = state['bet'] * 2
-        players[winner_uid]['balance'] += pot
+        players[winner_uid]['balance'] += state['bet'] * 2
         players[winner_uid]['wins'] += 1
-        
-        # Банкир получает 100% от банка сверху
-        banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-        if banker_uid and banker_uid in players:
-            players[banker_uid]['balance'] += pot
-        
         players[loser_uid]['losses'] += 1
         text = f"🍪 **{reason}**\n\n🏆 Победитель: {players[winner_uid]['name']} (+{state['bet']} монет)"
     try:
