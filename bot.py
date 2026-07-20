@@ -33,9 +33,7 @@ MIN_ROULETTE = 2
 COOKIES_TOTAL = 30
 PAY_LIMIT = 100000
 CREDIT_MAX = 300000
-BANKER_USERNAME = "SANS_ZM"
 ADMIN_USERNAME = "SANS_ZM"
-CREDIT_COMMISSION = 1.0
 CREDIT_MINUTES = 30
 USD_UPDATE_SECONDS = 120
 MIN_DICE = 2
@@ -61,6 +59,10 @@ CURRENCIES = {
 LEGACY_ALIASES = {"$": "usd", "usd": "usd", "доллар": "usd", "доллары": "usd", "долларов": "usd"}
 
 credits = {}  # {user_id: {"amount": int, "taken_at": ts, "chat_id": int}}
+contracts = {}         # {contract_id: {"text","reward","currency","creator","status","claims":[claim_ids]}}
+contract_claims = {}   # {claim_id: {"contract_id","user_id","status"}}
+_contract_id_counter = 0
+_claim_id_counter = 0
 rates = {code: info["start"] for code, info in CURRENCIES.items()}  # живые курсы
 games_dice = {}  # {chat_id: game_state}
 
@@ -140,6 +142,11 @@ def save_data():
             "username_to_id": username_to_id,
             "rates": rates,
             "banned_users": list(banned_users),
+            "muted_users": muted_users,
+            "contracts": {str(cid): c for cid, c in contracts.items()},
+            "contract_claims": {str(clid): cl for clid, cl in contract_claims.items()},
+            "_contract_id_counter": _contract_id_counter,
+            "_claim_id_counter": _claim_id_counter,
         }
         tmp_path = DATA_FILE + ".tmp"
         with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -176,6 +183,15 @@ def load_data():
                 if old_key in data:
                     rates[code] = data[old_key]
         banned_users.update(data.get("banned_users", []))
+        for uid_str, expiry in data.get("muted_users", {}).items():
+            muted_users[int(uid_str)] = expiry
+        for cid_str, c in data.get("contracts", {}).items():
+            contracts[int(cid_str)] = c
+        for clid_str, cl in data.get("contract_claims", {}).items():
+            contract_claims[int(clid_str)] = cl
+        global _contract_id_counter, _claim_id_counter
+        _contract_id_counter = data.get("_contract_id_counter", 0)
+        _claim_id_counter = data.get("_claim_id_counter", 0)
         logging.info(f"Данные загружены: {len(players)} игроков")
     except Exception as e:
         logging.error(f"Ошибка загрузки данных: {e}")
@@ -2135,24 +2151,15 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Максимальная сумма кредита: {CREDIT_MAX} монет.")
         return
 
-    # === Игрок получает 100% суммы ===
     players[user_id]['balance'] += amount
-
-    # === Банкир получает 100% от суммы сверху (бонус) ===
-    banker_uid = username_to_id.get(BANKER_USERNAME.lower())
-    if banker_uid and banker_uid != user_id and banker_uid in players:
-        players[banker_uid]['balance'] += amount
-
-    # записываем кредит
     credits[user_id] = {"amount": amount, "taken_at": time.time(), "chat_id": chat_id}
     asyncio.create_task(schedule_collection(user_id, chat_id, context.bot))
 
-    # === Сообщение пользователю ===
     await update.message.reply_text(
         f"💳 **Кредит выдан: {amount} монет**\n\n"
-        f"💰 На баланс зачислено: {amount} монет\n\n"
-        f"📊 Баланс: {players[user_id]['balance']} монет\n\n"
-        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и выебут тебя на спиздят {amount} монет автоматически.\n"
+        f"На баланс зачислено: {amount} монет (без вычетов)\n\n"
+        f"Баланс: {players[user_id]['balance']} монет\n\n"
+        f"⏰ Через {CREDIT_MINUTES} минут придут коллекторы и спишут {amount} монет автоматически.\n"
         f"Погасить раньше: /payback",
         parse_mode='Markdown'
     )
@@ -2430,9 +2437,212 @@ async def selleur_command(update, context):
     context.args = ["eur"] + list(context.args)
     await sell_command(update, context)
 
+# ================= КОНТРАКТЫ =================
+
+def reward_label(currency, amount):
+    if currency == 'coins':
+        return f"{amount} монет"
+    info = CURRENCIES[currency]
+    return f"{amount} {info['symbol']} {currency.upper()}"
+
+def contracts_text():
+    open_contracts = {cid: c for cid, c in contracts.items() if c['status'] == 'open'}
+    if not open_contracts:
+        return "📋 **Контракты**\n\nСейчас нет активных заданий. Загляни попозже!"
+    lines = ["📋 **Активные контракты**\n"]
+    for cid, c in open_contracts.items():
+        lines.append(f"**#{cid}** {c['text']}\n💰 Награда: {reward_label(c['currency'], c['reward'])}\n")
+    lines.append("Жми кнопку под нужным номером, если выполнил задание — заявку рассмотрит админ.")
+    return "\n".join(lines)
+
+def contracts_keyboard():
+    open_contracts = {cid: c for cid, c in contracts.items() if c['status'] == 'open'}
+    keyboard = [[InlineKeyboardButton(f"✅ Заявить о выполнении #{cid}", callback_data=f"ctr_claim_{cid}")] for cid in open_contracts]
+    keyboard.append([InlineKeyboardButton("🏠 В меню", callback_data="menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+async def contracts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in players:
+        players[user_id] = {
+            "name": update.effective_user.full_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    msg = await update.message.reply_text(contracts_text(), reply_markup=contracts_keyboard(), parse_mode='Markdown')
+    message_owners[msg.message_id] = user_id
+
+async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скрытая админ-команда: /contract <текст задания> | <награда> [валюта]"""
+    if not is_admin(update):
+        return
+    raw = update.message.text.split(maxsplit=1)
+    if len(raw) < 2 or '|' not in raw[1]:
+        await update.message.reply_text(
+            "Использование: /contract <текст задания> | <награда> [валюта]\n"
+            "Например: /contract Собери 50000+ с игры рулетка | 5000\n"
+            "Или: /contract Приведи друга в чат | 10 usd"
+        )
+        return
+    text_part, reward_part = raw[1].split('|', 1)
+    text_part = text_part.strip()
+    if not text_part:
+        await update.message.reply_text("❌ Текст задания не может быть пустым.")
+        return
+    reward_tokens = reward_part.strip().split()
+    if not reward_tokens or not reward_tokens[0].replace('.', '', 1).isdigit():
+        await update.message.reply_text("❌ Награда должна начинаться с числа.")
+        return
+    reward = float(reward_tokens[0])
+    if reward <= 0:
+        await update.message.reply_text("❌ Награда должна быть больше нуля.")
+        return
+    currency = 'coins'
+    if len(reward_tokens) > 1:
+        code = resolve_currency_code(reward_tokens[1])
+        if code:
+            currency = code
+
+    global _contract_id_counter
+    _contract_id_counter += 1
+    cid = _contract_id_counter
+    contracts[cid] = {
+        "text": text_part, "reward": reward, "currency": currency,
+        "creator": update.effective_user.id, "status": "open", "claims": []
+    }
+    save_data()
+    await update.message.reply_text(
+        f"✅ Контракт **#{cid}** создан и виден всем игрокам в меню \"Контракты\":\n\n"
+        f"{text_part}\n💰 Награда: {reward_label(currency, reward)}",
+        parse_mode='Markdown'
+    )
+
+async def closecontract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скрытая админ-команда: /closecontract <id>"""
+    if not is_admin(update):
+        return
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /closecontract <id>")
+        return
+    cid = int(args[0])
+    if cid not in contracts:
+        await update.message.reply_text("❌ Контракт не найден.")
+        return
+    contracts[cid]['status'] = 'closed'
+    save_data()
+    await update.message.reply_text(f"✅ Контракт #{cid} закрыт.")
+
+async def contracts_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    data = query.data
+
+    if data.startswith("ctr_claim_"):
+        cid = int(data.split("_")[2])
+        contract = contracts.get(cid)
+        if not contract or contract['status'] != 'open':
+            await query.answer("❌ Контракт недоступен", show_alert=True)
+            return
+        already = any(
+            cl['user_id'] == user_id and cl['status'] == 'pending' and cl['contract_id'] == cid
+            for cl in contract_claims.values()
+        )
+        if already:
+            await query.answer("❌ Ты уже подал заявку на этот контракт, жди ответа админа", show_alert=True)
+            return
+        if user_id not in players:
+            players[user_id] = {
+                "name": update.effective_user.full_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+            }
+
+        global _claim_id_counter
+        _claim_id_counter += 1
+        claim_id = _claim_id_counter
+        contract_claims[claim_id] = {"contract_id": cid, "user_id": user_id, "status": "pending"}
+        contract['claims'].append(claim_id)
+        save_data()
+
+        await query.answer("✅ Заявка отправлена админу на проверку!")
+        name = players[user_id]['name']
+        admin_uid = username_to_id.get(ADMIN_USERNAME.lower())
+        if admin_uid:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"ctr_approve_{claim_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"ctr_reject_{claim_id}")
+            ]])
+            try:
+                await context.bot.send_message(
+                    admin_uid,
+                    f"📋 **Заявка на контракт #{cid}**\n\n"
+                    f"Игрок: {name}\nЗадание: {contract['text']}\n"
+                    f"Награда: {reward_label(contract['currency'], contract['reward'])}",
+                    reply_markup=kb, parse_mode='Markdown'
+                )
+            except Exception:
+                pass
+        return
+
+    if data.startswith("ctr_approve_") or data.startswith("ctr_reject_"):
+        if not is_admin(update):
+            await query.answer("❌ Только админ может это делать", show_alert=True)
+            return
+        claim_id = int(data.split("_")[2])
+        claim = contract_claims.get(claim_id)
+        if not claim or claim['status'] != 'pending':
+            await query.answer("❌ Заявка не найдена или уже обработана", show_alert=True)
+            return
+        contract = contracts.get(claim['contract_id'])
+        target_uid = claim['user_id']
+        approve = data.startswith("ctr_approve_")
+
+        if approve:
+            claim['status'] = 'approved'
+            if contract:
+                if target_uid not in players:
+                    players[target_uid] = {
+                        "name": "Игрок", "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+                    }
+                if contract['currency'] == 'coins':
+                    players[target_uid]['balance'] += contract['reward']
+                else:
+                    ensure_wallet(target_uid)
+                    add_bal(target_uid, contract['currency'], contract['reward'])
+                contract['status'] = 'closed'
+            await query.answer("✅ Одобрено, деньги выданы!")
+            try:
+                await query.edit_message_text(query.message.text + "\n\n✅ ОДОБРЕНО, НАГРАДА ВЫДАНА")
+            except Exception:
+                pass
+            if contract:
+                try:
+                    await context.bot.send_message(
+                        target_uid,
+                        f"✅ Твой контракт **\"{contract['text']}\"** одобрен!\nНаграда зачислена: {reward_label(contract['currency'], contract['reward'])}",
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass
+        else:
+            claim['status'] = 'rejected'
+            await query.answer("Отклонено")
+            try:
+                await query.edit_message_text(query.message.text + "\n\n❌ ОТКЛОНЕНО")
+            except Exception:
+                pass
+            if contract:
+                try:
+                    await context.bot.send_message(
+                        target_uid, f"❌ Твоя заявка на контракт **\"{contract['text']}\"** отклонена."
+                        , parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass
+        save_data()
+        return
+
 # ================= АДМИН-КОМАНДЫ (СКРЫТЫЕ, НЕ В МЕНЮ) =================
 
 banned_users = set()
+muted_users = {}  # {user_id: expiry_timestamp}
 
 def is_admin(update: Update):
     user = update.effective_user
@@ -2571,17 +2781,189 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💱 Курсы: " + " | ".join(f"{CURRENCIES[c]['symbol']}{rates[c]}" for c in CURRENCIES)
     )
 
+async def lookup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, _ = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    p = players[target_id]
+    wallet = p.get('wallet', {})
+    wallet_str = ", ".join(f"{code.upper()}: {fmt_amount(code, amt)}" for code, amt in wallet.items() if amt) or "пусто"
+    credit_str = "нет"
+    if target_id in credits:
+        c = credits[target_id]
+        remaining = max(0, CREDIT_MINUTES * 60 - (time.time() - c['taken_at']))
+        credit_str = f"{c['amount']} монет, спишется через {int(remaining // 60)} мин"
+    status = []
+    if target_id in banned_users:
+        status.append("🚫 забанен")
+    if target_id in muted_users and time.time() < muted_users[target_id]:
+        left = int((muted_users[target_id] - time.time()) // 60)
+        status.append(f"🔇 заглушен ещё {left} мин")
+    await update.message.reply_text(
+        f"🔎 **{target_name}** (id `{target_id}`)\n\n"
+        f"💰 Баланс: {p['balance']} монет\n💱 Кошелёк: {wallet_str}\n"
+        f"🏆 Побед: {p['wins']} | 😢 Поражений: {p['losses']}\n"
+        f"💳 Кредит: {credit_str}\n"
+        f"⚠️ Статус: {', '.join(status) if status else 'нет ограничений'}",
+        parse_mode='Markdown'
+    )
+
+async def wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, _ = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    players[target_id] = {
+        "name": target_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+    }
+    credits.pop(target_id, None)
+    save_data()
+    await update.message.reply_text(f"✅ Профиль {target_name} полностью сброшен.")
+
+async def setname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, rest_args = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    if not rest_args:
+        await update.message.reply_text("Использование: /setname <новое имя> (или /setname @username <новое имя>)")
+        return
+    new_name = " ".join(rest_args)
+    players[target_id]['name'] = new_name
+    save_data()
+    await update.message.reply_text(f"✅ Имя изменено: {target_name} → {new_name}")
+
+async def forgivecredit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, _ = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    if target_id not in credits:
+        await update.message.reply_text(f"❌ У {target_name} нет активного кредита.")
+        return
+    amount = credits.pop(target_id)['amount']
+    save_data()
+    await update.message.reply_text(f"✅ Кредит {target_name} на {amount} монет прощён, списания не будет.")
+
+async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(f"Использование: /setrate <код> <значение>\nДоступные: {currency_list_str()}")
+        return
+    code = resolve_currency_code(args[0])
+    if not code:
+        await update.message.reply_text(f"❌ Неизвестная валюта. Доступные: {currency_list_str()}")
+        return
+    try:
+        value = float(args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Введи число.")
+        return
+    if value <= 0:
+        await update.message.reply_text("❌ Курс должен быть больше нуля.")
+        return
+    rates[code] = value
+    save_data()
+    await update.message.reply_text(f"✅ Курс {code.upper()} установлен: {value}")
+
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    pending = {clid: cl for clid, cl in contract_claims.items() if cl['status'] == 'pending'}
+    if not pending:
+        await update.message.reply_text("📭 Нет заявок на рассмотрении.")
+        return
+    lines = ["⏳ **Заявки на рассмотрении**\n"]
+    for clid, cl in pending.items():
+        contract = contracts.get(cl['contract_id'])
+        name = players.get(cl['user_id'], {}).get('name', str(cl['user_id']))
+        text = contract['text'] if contract else '(контракт удалён)'
+        lines.append(f"**Заявка #{clid}** от {name} — контракт #{cl['contract_id']}: {text}")
+    lines.append("\nОтветь на уведомление в личке кнопками, или подтверди командой /contract, если сообщение потерялось.")
+    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+
+async def listcontracts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if not contracts:
+        await update.message.reply_text("📭 Контрактов ещё не было.")
+        return
+    lines = ["📋 **Все контракты**\n"]
+    for cid, c in contracts.items():
+        status_emoji = "🟢" if c['status'] == 'open' else "🔴"
+        lines.append(f"{status_emoji} **#{cid}** ({c['status']}) {c['text']} — {reward_label(c['currency'], c['reward'])}")
+    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+
+async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, rest_args = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    if not rest_args or not rest_args[0].isdigit():
+        await update.message.reply_text("Использование: /mute <минуты> (или /mute @username <минуты>)")
+        return
+    minutes = int(rest_args[0])
+    muted_users[target_id] = time.time() + minutes * 60
+    save_data()
+    await update.message.reply_text(f"🔇 {target_name} заглушен на {minutes} мин.")
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    target_id, target_name, _ = await resolve_target_user(update, context)
+    if target_id is None:
+        return
+    muted_users.pop(target_id, None)
+    save_data()
+    await update.message.reply_text(f"🔊 {target_name} разглушен.")
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    save_data()
+    if not os.path.exists(DATA_FILE):
+        await update.message.reply_text("❌ Файл данных ещё не создан.")
+        return
+    try:
+        await context.bot.send_document(update.effective_user.id, document=open(DATA_FILE, 'rb'), filename="bot_data_backup.json")
+        if update.effective_chat.id != update.effective_user.id:
+            await update.message.reply_text("✅ Бэкап отправлен тебе в личку.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Не удалось отправить бэкап: {e}")
+
 # ================= ОБЫЧНЫЕ КОМАНДЫ =================
 
 async def ban_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user and user.id in banned_users:
+    if not user:
+        return
+    if user.id in banned_users:
         raise ApplicationHandlerStop
+    if user.id in muted_users:
+        if time.time() < muted_users[user.id]:
+            raise ApplicationHandlerStop
+        del muted_users[user.id]
 
 async def touch_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user and user.username:
+    if not user or user.is_bot:
+        return
+    if user.username:
         username_to_id[user.username.lower()] = user.id
+    if user.id not in players:
+        players[user.id] = {
+            "name": user.full_name, "balance": 1000, "games": {"uno": 0}, "wins": 0, "losses": 0
+        }
+    elif players[user.id].get('name') != user.full_name:
+        players[user.id]['name'] = user.full_name
 
 async def set_commands(app):
     commands = [
@@ -2607,6 +2989,7 @@ async def set_commands(app):
         ("buy", "📈 Купить валюту"),
         ("sell", "📉 Продать валюту"),
         ("exchange", "🔄 Обменять валюту на валюту"),
+        ("contracts", "📋 Контракты"),
         ("top", "🏆 Рейтинг игроков"),
     ]
     await app.bot.set_my_commands(commands)
@@ -2625,6 +3008,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎮 Игры", callback_data="games_menu")],
         [InlineKeyboardButton("👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton("💸 Перевести монеты", callback_data="pay_info")],
+        [InlineKeyboardButton("📋 Контракты", callback_data="contracts_info")],
         [InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
         [InlineKeyboardButton("📖 Помощь", callback_data="help")]
     ]
@@ -2784,11 +3168,19 @@ HELP_TEXT = f"""📖 **Помощь**
 
 💳 **Кредит**
 • `/credit <сумма>` — максимум {CREDIT_MAX} монет, только один активный кредит одновременно
-• На баланс зачисляется полная сумма без вычетов, и вернуть нужно ровно столько же — кредит честный, без процентов для заёмщика
-• При этом игроку @{BANKER_USERNAME} с каждого кредита отдельно капает 100% суммы бонусом — это его "зарплата" за работу банком
+• На баланс зачисляется полная сумма без вычетов, и вернуть нужно ровно столько же — кредит честный, без процентов и скрытых комиссий
 • Через {CREDIT_MINUTES} минут долг спишется автоматически — придут коллекторы и заберут сумму кредита
 • Если денег не хватит — баланс уйдёт в минус
 • Погасить раньше самому: `/payback`
+
+━━━━━━━━━━━━━━━
+
+📋 **Контракты**
+Задания от администрации бота за реальную награду.
+• `/contracts` (или кнопка "📋 Контракты" в меню) — список активных заданий
+• Выполнил задание — жми "✅ Заявить о выполнении", заявку рассмотрит админ
+• После подтверждения награда сразу зачисляется на баланс (монеты или любая валюта)
+• Новые контракты создаёт только администрация бота
 
 ━━━━━━━━━━━━━━━
 
@@ -2806,6 +3198,7 @@ HELP_TEXT = f"""📖 **Помощь**
 ━━━━━━━━━━━━━━━
 
 💰 Баланс, победы и поражения одни на все игры и не привязаны к конкретной группе — рейтинг `/top` глобальный (боты в топ не попадают).
+👤 Регистрация автоматическая: достаточно один раз что-нибудь написать в группе с ботом (необязательно команду) — и ты уже в системе и в рейтинге.
 📌 Пока лобби/игра активны, их сообщение закреплено в чате — открепляется автоматически после окончания. Для этого у бота должны быть права на закрепление сообщений в группе.
 🤖 В УНО, Русской рулетке, Костях, Монетке и Печеньках есть кнопка "Играть с ботом" — можно играть даже в одиночку, боты ходят автоматически."""
 
@@ -2925,6 +3318,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🎮 Игры", callback_data="games_menu")],
             [InlineKeyboardButton("👤 Профиль", callback_data="profile")],
             [InlineKeyboardButton("💸 Перевести монеты", callback_data="pay_info")],
+            [InlineKeyboardButton("📋 Контракты", callback_data="contracts_info")],
             [InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
             [InlineKeyboardButton("📖 Помощь", callback_data="help")]
         ]
@@ -3000,6 +3394,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⚠️ Лимит: не больше {PAY_LIMIT} монет за один перевод (переводов можно делать сколько угодно)."""
         keyboard = [[InlineKeyboardButton("🏠 В меню", callback_data="menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "contracts_info":
+        await query.edit_message_text(contracts_text(), reply_markup=contracts_keyboard(), parse_mode='Markdown')
 
     elif data == "profile":
         if user_id not in players:
@@ -3087,6 +3484,9 @@ def main():
     # --- скрытые админ-команды, намеренно НЕ в set_commands() ---
     app.add_handler(CommandHandler("grant", grant_command))
     app.add_handler(CommandHandler("grantcur", grantcur_command))
+    app.add_handler(CommandHandler("contract", contract_command))
+    app.add_handler(CommandHandler("closecontract", closecontract_command))
+    app.add_handler(CommandHandler("contracts", contracts_command))
     app.add_handler(CommandHandler("setbalance", setbalance_command))
     app.add_handler(CommandHandler("forceend", forceend_command))
     app.add_handler(CommandHandler("resetrates", resetrates_command))
@@ -3094,6 +3494,16 @@ def main():
     app.add_handler(CommandHandler("ban", ban_command))
     app.add_handler(CommandHandler("unban", unban_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("lookup", lookup_command))
+    app.add_handler(CommandHandler("wipe", wipe_command))
+    app.add_handler(CommandHandler("setname", setname_command))
+    app.add_handler(CommandHandler("forgivecredit", forgivecredit_command))
+    app.add_handler(CommandHandler("setrate", setrate_command))
+    app.add_handler(CommandHandler("pending", pending_command))
+    app.add_handler(CommandHandler("listcontracts", listcontracts_command))
+    app.add_handler(CommandHandler("mute", mute_command))
+    app.add_handler(CommandHandler("unmute", unmute_command))
+    app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("cookies", cookies_command))
     app.add_handler(CommandHandler("stopcookies", stop_cookies_command))
 
@@ -3103,6 +3513,7 @@ def main():
     app.add_handler(CallbackQueryHandler(coin_callback_handler, pattern="^coin_"))
     app.add_handler(CallbackQueryHandler(roulette_callback_handler, pattern="^roul_"))
     app.add_handler(CallbackQueryHandler(dice_callback_handler, pattern="^dice_"))
+    app.add_handler(CallbackQueryHandler(contracts_callback_handler, pattern="^ctr_"))
     app.add_handler(CallbackQueryHandler(cookies_callback_handler, pattern="^cook_"))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
